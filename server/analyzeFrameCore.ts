@@ -6,7 +6,12 @@ import type {
   SignalDirection,
 } from '../src/types/signals.ts';
 
-export const MIN_SIGNAL_CONFIDENCE = 90;
+import {
+  MIN_SIGNAL_CONFIDENCE,
+  isSignalConfidenceValid,
+} from '../src/config/signalConfig.ts';
+
+export { MIN_SIGNAL_CONFIDENCE };
 
 let cachedApiKey: string | null = null;
 let aiClient: GoogleGenAI | null = null;
@@ -164,7 +169,7 @@ export function applySignalPrecisionFilter(params: {
 
   if (
     !params.chartDetected ||
-    confidence < MIN_SIGNAL_CONFIDENCE ||
+    !isSignalConfidenceValid(confidence) ||
     marketRegime === 'SIDEWAYS' ||
     marketRegime === 'UNCLEAR' ||
     (signal === 'COMPRA' && marketRegime !== 'TRENDING_UP') ||

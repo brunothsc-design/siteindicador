@@ -8,6 +8,8 @@ import {
   emptyAnalyzeResponse,
   executeGeminiFrameAnalysis,
 } from './server/analyzeFrameCore.ts';
+import { computeCandleStatusAnchor } from './src/engine/operationalStatus.ts';
+import { isSignalConfidenceValid } from './src/config/signalConfig.ts';
 import type {
   AnalyzeFrameRequest,
   LiveCandleTracker,
@@ -65,11 +67,16 @@ async function startServer(): Promise<void> {
     const now = Date.now();
     if (overlayState.active && overlayState.signal && now > overlayState.signal.expiresAt) {
       overlayState.signal = null;
+      const liveAnchor =
+        computeCandleStatusAnchor(overlayState.liveCandle, overlayState.chartBounds, now) ??
+        overlayState.operationalStatus?.anchor ??
+        null;
       overlayState.operationalStatus = {
         status: 'AGUARDANDO',
         timeframe: 'M1',
         confidence: 0,
         chartBounds: overlayState.chartBounds,
+        anchor: liveAnchor,
         expiresAt: null,
         updatedAt: now,
       };
@@ -122,6 +129,7 @@ async function startServer(): Promise<void> {
       timeframe: 'M1',
       confidence: 0,
       chartBounds: null,
+      anchor: null,
       expiresAt: null,
       updatedAt: now,
     };
@@ -180,14 +188,48 @@ async function startServer(): Promise<void> {
 
     const incoming = body?.operationalStatus;
     const rawStatus = String(incoming?.status ?? 'AGUARDANDO').toUpperCase();
+    const incomingConfidence = typeof incoming?.confidence === 'number' ? incoming.confidence : 0;
     const safeStatus =
-      rawStatus === 'COMPRA' || rawStatus === 'VENDA' ? rawStatus : 'AGUARDANDO';
+      (rawStatus === 'COMPRA' || rawStatus === 'VENDA') &&
+      (typeof incoming?.confidence !== 'number' || isSignalConfidenceValid(incomingConfidence))
+        ? rawStatus
+        : 'AGUARDANDO';
+
+    const incomingAnchor = incoming?.anchor;
+    const validAnchor =
+      incomingAnchor &&
+      typeof incomingAnchor.x === 'number' &&
+      typeof incomingAnchor.y === 'number' &&
+      Number.isFinite(incomingAnchor.x) &&
+      Number.isFinite(incomingAnchor.y)
+        ? {
+            x: incomingAnchor.x,
+            y: incomingAnchor.y,
+            chartRelativeX:
+              typeof incomingAnchor.chartRelativeX === 'number'
+                ? incomingAnchor.chartRelativeX
+                : incomingAnchor.x,
+            chartRelativeY:
+              typeof incomingAnchor.chartRelativeY === 'number'
+                ? incomingAnchor.chartRelativeY
+                : incomingAnchor.y,
+            candleTopY:
+              typeof incomingAnchor.candleTopY === 'number'
+                ? incomingAnchor.candleTopY
+                : incomingAnchor.y,
+            updatedAt: Date.now(),
+          }
+        : computeCandleStatusAnchor(
+            overlayState.liveCandle,
+            incoming?.chartBounds ?? overlayState.chartBounds ?? null
+          );
 
     const nextStatus: OperationalStatusState = {
       status: safeStatus,
       timeframe: 'M1',
-      confidence: typeof incoming?.confidence === 'number' ? incoming.confidence : 0,
+      confidence: safeStatus === 'AGUARDANDO' ? 0 : incomingConfidence,
       chartBounds: incoming?.chartBounds ?? overlayState.chartBounds ?? null,
+      anchor: validAnchor,
       expiresAt: typeof incoming?.expiresAt === 'number' ? incoming.expiresAt : null,
       updatedAt: Date.now(),
     };
@@ -247,7 +289,10 @@ async function startServer(): Promise<void> {
         overlayState.chartBounds = result.body.chartBounds;
       }
 
-      if (result.body.signal === 'COMPRA' || result.body.signal === 'VENDA') {
+      if (
+        (result.body.signal === 'COMPRA' || result.body.signal === 'VENDA') &&
+        isSignalConfidenceValid(result.body.confidence)
+      ) {
         const now = Date.now();
         const nextSignal: VisualSignal = {
           id: `${sessionId}-${now}`,
@@ -264,11 +309,17 @@ async function startServer(): Promise<void> {
           expiresAt: now + 18000,
         };
         overlayState.signal = nextSignal;
+        const nextBounds = nextSignal.chartBounds ?? overlayState.chartBounds;
+        const liveAnchor =
+          computeCandleStatusAnchor(overlayState.liveCandle, nextBounds, now) ??
+          overlayState.operationalStatus?.anchor ??
+          null;
         overlayState.operationalStatus = {
           status: nextSignal.direction,
           timeframe: 'M1',
           confidence: nextSignal.confidence,
-          chartBounds: nextSignal.chartBounds ?? overlayState.chartBounds,
+          chartBounds: nextBounds,
+          anchor: liveAnchor,
           expiresAt: nextSignal.expiresAt,
           updatedAt: now,
         };
@@ -277,11 +328,16 @@ async function startServer(): Promise<void> {
       } else if (overlayState.signal && Date.now() > overlayState.signal.expiresAt) {
         const now = Date.now();
         overlayState.signal = null;
+        const liveAnchor =
+          computeCandleStatusAnchor(overlayState.liveCandle, overlayState.chartBounds, now) ??
+          overlayState.operationalStatus?.anchor ??
+          null;
         overlayState.operationalStatus = {
           status: 'AGUARDANDO',
           timeframe: 'M1',
           confidence: 0,
           chartBounds: overlayState.chartBounds,
+          anchor: liveAnchor,
           expiresAt: null,
           updatedAt: now,
         };

@@ -19,9 +19,18 @@ import {
   classifyGeminiUpstreamError,
   executeGeminiFrameAnalysis,
 } from '../server/analyzeFrameCore.ts';
+import {
+  PRODUCTION_MIN_SIGNAL_CONFIDENCE,
+  TEMPORARY_TEST_MIN_SIGNAL_CONFIDENCE,
+  USE_TEMPORARY_TEST_CONFIDENCE,
+  isSignalConfidenceValid,
+} from '../src/config/signalConfig.ts';
 import { isTrustedOverlayOrigin } from '../src/engine/localOverlayBridge.ts';
 import {
+  CANDLE_ANCHOR_HOLD_MS,
   MANDATORY_TIMEFRAME,
+  MIN_OPERATIONAL_CONFIDENCE,
+  computeCandleStatusAnchor,
   createInitialOperationalStatus,
   operationalStatusChanged,
   resolveOperationalStatus,
@@ -485,41 +494,61 @@ describe('ChartPulse AI — Universal Multi-Broker Layout Recognition', () => {
   });
 });
 
-describe('ChartPulse AI — Production Gemini Config (90% Confidence & Netlify Function)', () => {
-  it('restores minimum signal confidence strictly to 90%', () => {
-    assert.equal(MIN_SIGNAL_CONFIDENCE, 90);
+describe('ChartPulse AI — Temporary Test Confidence (65%) & Preserved Production Config (90%)', () => {
+  it('enforces temporary 65% signal confidence across all validators while preserving original 90% production constant', () => {
+    assert.equal(PRODUCTION_MIN_SIGNAL_CONFIDENCE, 90);
+    assert.equal(TEMPORARY_TEST_MIN_SIGNAL_CONFIDENCE, 65);
+    assert.equal(USE_TEMPORARY_TEST_CONFIDENCE, true);
+    assert.equal(MIN_SIGNAL_CONFIDENCE, 65);
+    assert.equal(MIN_OPERATIONAL_CONFIDENCE, 65);
 
-    const below90 = applySignalPrecisionFilter({
+    const below65 = applySignalPrecisionFilter({
       chartDetected: true,
       rawSignal: 'COMPRA',
-      confidence: 89,
+      confidence: 64,
       rawRegime: 'TRENDING_UP',
     });
-    assert.equal(below90.signal, 'NONE');
+    assert.equal(below65.signal, 'NONE');
+    assert.equal(below65.confidence, 64);
 
-    const at60 = applySignalPrecisionFilter({
+    const at58 = applySignalPrecisionFilter({
       chartDetected: true,
       rawSignal: 'VENDA',
-      confidence: 60,
+      confidence: 58,
       rawRegime: 'TRENDING_DOWN',
     });
-    assert.equal(at60.signal, 'NONE');
+    assert.equal(at58.signal, 'NONE');
+    assert.equal(at58.confidence, 58);
 
-    const at90Buy = applySignalPrecisionFilter({
+    const at65Buy = applySignalPrecisionFilter({
       chartDetected: true,
       rawSignal: 'COMPRA',
-      confidence: 90,
+      confidence: 65,
       rawRegime: 'TRENDING_UP',
     });
-    assert.equal(at90Buy.signal, 'COMPRA');
+    assert.equal(at65Buy.signal, 'COMPRA');
+    assert.equal(at65Buy.confidence, 65);
 
-    const at92Sell = applySignalPrecisionFilter({
+    const at72Sell = applySignalPrecisionFilter({
       chartDetected: true,
       rawSignal: 'VENDA',
+      confidence: 72,
+      rawRegime: 'TRENDING_DOWN',
+    });
+    assert.equal(at72Sell.signal, 'VENDA');
+    assert.equal(at72Sell.confidence, 72);
+
+    const at92Buy = applySignalPrecisionFilter({
+      chartDetected: true,
+      rawSignal: 'COMPRA',
       confidence: 92,
-      rawRegime: 'TRENDING_DOWN',
+      rawRegime: 'TRENDING_UP',
     });
-    assert.equal(at92Sell.signal, 'VENDA');
+    assert.equal(at92Buy.signal, 'COMPRA');
+    assert.equal(at92Buy.confidence, 92);
+
+    assert.equal(isSignalConfidenceValid(64), false);
+    assert.equal(isSignalConfidenceValid(65), true);
   });
 
   it('classifies auth, quota 429, and API unavailability errors safely without leaking keys', () => {
@@ -963,15 +992,23 @@ describe('ChartPulse AI — Additional Live Forming Candle Tracking', () => {
     assert.ok(downCandle !== null);
     assert.ok(downCandle.y > upCandle.y + 0.25);
 
-    // Existing 90% precision filter remains untouched
-    assert.equal(MIN_SIGNAL_CONFIDENCE, 90);
-    const rejected89 = applySignalPrecisionFilter({
+    // Centralized signal precision filter accepts >= 65% (temporary test limit) and rejects < 65%
+    assert.equal(MIN_SIGNAL_CONFIDENCE, 65);
+    const rejected64 = applySignalPrecisionFilter({
       chartDetected: true,
       rawSignal: 'COMPRA',
-      confidence: 89,
+      confidence: 64,
       rawRegime: 'TRENDING_UP',
     });
-    assert.equal(rejected89.signal, 'NONE');
+    assert.equal(rejected64.signal, 'NONE');
+    const accepted68 = applySignalPrecisionFilter({
+      chartDetected: true,
+      rawSignal: 'COMPRA',
+      confidence: 68,
+      rawRegime: 'TRENDING_UP',
+    });
+    assert.equal(accepted68.signal, 'COMPRA');
+    assert.equal(accepted68.confidence, 68);
   });
 
   it('tracks colored forming candle close even without a horizontal priceLine, and returns null when ambiguous or missing chart', () => {
@@ -1217,125 +1254,256 @@ describe('ChartPulse AI — M1 Timeframe (1 Minute) End-to-End Detection & Windo
 });
 
 describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDANDO / COMPRA / VENDA)', () => {
-  it('transitions smoothly across AGUARDANDO -> COMPRA -> AGUARDANDO -> VENDA -> AGUARDANDO on M1 without flicker', () => {
+  it('positions AGUARDANDO/COMPRA/VENDA centered directly above the forming M1 candle and tracks movement without inventing fallback positions', () => {
     assert.equal(MANDATORY_TIMEFRAME, 'M1');
     const bounds = { x: 0.06, y: 0.1, width: 0.76, height: 0.74 };
     const t0 = 1_700_000_000_000;
 
-    // 1. Initial active state must start on AGUARDANDO in M1 even with no signal yet
-    const initial = createInitialOperationalStatus(bounds, t0);
+    // 1. No candle identified yet => anchor must be null (never invent fixed screen coordinates)
+    const initial = createInitialOperationalStatus(bounds, null, t0);
     assert.equal(initial.status, 'AGUARDANDO');
     assert.equal(initial.timeframe, 'M1');
-    assert.equal(initial.confidence, 0);
+    assert.equal(initial.anchor, null);
+    assert.equal(computeCandleStatusAnchor(null, bounds, t0), null);
 
-    // 2. Momentary/weak candidate (< 90%) stays AGUARDANDO
-    const filteredWeak = applySignalPrecisionFilter({
-      chartDetected: true,
-      rawSignal: 'COMPRA',
-      confidence: 84,
-      rawRegime: 'TRENDING_UP',
+    // 2. Render two real M1 chart frames where the forming M1 candle moves upward and verify live anchor tracks it above its top
+    const frameLower = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.56,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
     });
-    assert.equal(filteredWeak.signal, 'NONE');
-    const stillWaiting = resolveOperationalStatus({
+    const digestLower = processFrameLocally(frameLower, 640, 360, null);
+    assert.equal(digestLower.chartDetected, true);
+    const liveLower = detectLiveMovingCandle(
+      frameLower,
+      640,
+      360,
+      digestLower.chartBounds,
+      digestLower.priceLine
+    );
+    assert.ok(liveLower !== null);
+
+    const statusLower = resolveOperationalStatus({
       isActive: true,
       current: initial,
       activeSignal: null,
-      latestBounds: bounds,
-      now: t0 + 1000,
+      liveCandle: liveLower,
+      latestBounds: digestLower.chartBounds,
+      chartDetected: true,
+      now: t0 + 350,
     });
-    assert.ok(stillWaiting !== null);
-    assert.equal(stillWaiting.status, 'AGUARDANDO');
-    assert.equal(operationalStatusChanged(initial, stillWaiting), false);
+    assert.ok(statusLower !== null && statusLower.anchor !== null);
+    assert.equal(statusLower.status, 'AGUARDANDO');
+    assert.ok(
+      Math.abs(statusLower.anchor.x - liveLower.x) <= 0.015,
+      `Expected status horizontally centered on candle x=${liveLower.x}, got ${statusLower.anchor.x}`
+    );
+    assert.ok(
+      statusLower.anchor.y < liveLower.topY,
+      `Expected status strictly above candle topY=${liveLower.topY}, got ${statusLower.anchor.y}`
+    );
 
-    // 3. Confirmed M1 COMPRA (>= 90%) switches status to COMPRA
+    const frameHigher = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.34,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
+    });
+    const digestHigher = processFrameLocally(frameHigher, 640, 360, digestLower.signature);
+    const liveHigher = detectLiveMovingCandle(
+      frameHigher,
+      640,
+      360,
+      digestHigher.chartBounds,
+      digestHigher.priceLine
+    );
+    assert.ok(liveHigher !== null);
+
+    const statusHigher = resolveOperationalStatus({
+      isActive: true,
+      current: statusLower,
+      activeSignal: null,
+      liveCandle: liveHigher,
+      latestBounds: digestHigher.chartBounds,
+      chartDetected: true,
+      now: t0 + 700,
+    });
+    assert.ok(statusHigher !== null && statusHigher.anchor !== null);
+    assert.equal(statusHigher.status, 'AGUARDANDO');
+    assert.ok(
+      statusHigher.anchor.y < statusLower.anchor.y - 0.1,
+      `Expected status anchor Y to rise with candle (${statusHigher.anchor.y} < ${statusLower.anchor.y})`
+    );
+    assert.ok(operationalStatusChanged(statusLower, statusHigher));
+
+    // 3. Momentary weak candidate (< 65%) stays AGUARDANDO at the exact candle anchor
+    const filteredWeak = applySignalPrecisionFilter({
+      chartDetected: true,
+      rawSignal: 'COMPRA',
+      confidence: 62,
+      rawRegime: 'TRENDING_UP',
+    });
+    assert.equal(filteredWeak.signal, 'NONE');
+
+    const weakCandidateSig = {
+      id: 'sig-weak-1',
+      direction: 'COMPRA' as const,
+      candleX: liveHigher.x,
+      candleY: liveHigher.y,
+      chartRelativeX: liveHigher.chartRelativeX,
+      chartRelativeY: liveHigher.chartRelativeY,
+      chartBounds: digestHigher.chartBounds,
+      confidence: 62,
+      candleId: 'm1-right-weak',
+      marketRegime: 'TRENDING_UP' as const,
+      createdAt: t0 + 800,
+      expiresAt: t0 + 18800,
+    };
+    const weakStatus = resolveOperationalStatus({
+      isActive: true,
+      current: statusHigher,
+      activeSignal: weakCandidateSig,
+      liveCandle: liveHigher,
+      latestBounds: digestHigher.chartBounds,
+      chartDetected: true,
+      now: t0 + 900,
+    });
+    assert.ok(weakStatus !== null && weakStatus.anchor !== null);
+    assert.equal(weakStatus.status, 'AGUARDANDO');
+
+    // 4. Confirmed M1 COMPRA (>= 65% temporary test threshold) replaces AGUARDANDO -> COMPRA while keeping exact candle anchor above candle
     const buySig = {
       id: 'sig-buy-1',
       direction: 'COMPRA' as const,
-      candleX: 0.71,
-      candleY: 0.44,
-      chartRelativeX: 0.85,
-      chartRelativeY: 0.46,
-      chartBounds: bounds,
-      confidence: 94,
+      candleX: liveHigher.x,
+      candleY: liveHigher.y,
+      chartRelativeX: liveHigher.chartRelativeX,
+      chartRelativeY: liveHigher.chartRelativeY,
+      chartBounds: digestHigher.chartBounds,
+      confidence: 67,
       candleId: 'm1-right-buy',
       marketRegime: 'TRENDING_UP' as const,
-      createdAt: t0 + 2000,
-      expiresAt: t0 + 20000,
+      createdAt: t0 + 1000,
+      expiresAt: t0 + 19000,
     };
     const buyState = resolveOperationalStatus({
       isActive: true,
-      current: stillWaiting,
+      current: statusHigher,
       activeSignal: buySig,
-      latestBounds: bounds,
-      now: t0 + 2500,
+      liveCandle: liveHigher,
+      latestBounds: digestHigher.chartBounds,
+      chartDetected: true,
+      now: t0 + 1200,
     });
-    assert.ok(buyState !== null);
+    assert.ok(buyState !== null && buyState.anchor !== null);
     assert.equal(buyState.status, 'COMPRA');
-    assert.equal(buyState.timeframe, 'M1');
-    assert.equal(buyState.confidence, 94);
-    assert.equal(operationalStatusChanged(stillWaiting, buyState), true);
+    assert.equal(buyState.confidence, 67);
+    assert.equal(buyState.anchor.x, statusHigher.anchor.x);
+    assert.equal(buyState.anchor.y, statusHigher.anchor.y);
 
-    // 4. Signal expiration reverts smoothly back to AGUARDANDO (never null while active)
-    const afterBuyExpire = resolveOperationalStatus({
+    // 5. Short transient frame miss holds anchor briefly without flickering, then clears if candle disappears past hold window
+    const briefHold = resolveOperationalStatus({
       isActive: true,
       current: buyState,
       activeSignal: buySig,
-      latestBounds: null,
-      now: t0 + 21000,
+      liveCandle: null,
+      latestBounds: digestHigher.chartBounds,
+      chartDetected: true,
+      now: t0 + 1200 + Math.floor(CANDLE_ANCHOR_HOLD_MS / 2),
     });
-    assert.ok(afterBuyExpire !== null);
-    assert.equal(afterBuyExpire.status, 'AGUARDANDO');
-    assert.deepEqual(afterBuyExpire.chartBounds, bounds, 'Preserves chartBounds without flicker between captures');
+    assert.ok(briefHold !== null && briefHold.anchor !== null, 'Holds anchor across brief single-frame jitter');
 
-    // 5. Confirmed M1 VENDA (>= 90%) switches status to VENDA and reverts to AGUARDANDO after expiry
+    // Signal expires -> reverts smoothly to AGUARDANDO while keeping real candle anchor when candle present
+    const afterBuyExpire = resolveOperationalStatus({
+      isActive: true,
+      current: briefHold,
+      activeSignal: buySig,
+      liveCandle: liveHigher,
+      latestBounds: digestHigher.chartBounds,
+      chartDetected: true,
+      now: t0 + 20000,
+    });
+    assert.ok(afterBuyExpire !== null && afterBuyExpire.anchor !== null);
+    assert.equal(afterBuyExpire.status, 'AGUARDANDO');
+
+    // Prolonged candle loss (or non-chart screen) clears anchor rather than inventing a position
+    const lostCandle = resolveOperationalStatus({
+      isActive: true,
+      current: afterBuyExpire,
+      activeSignal: null,
+      liveCandle: null,
+      latestBounds: null,
+      chartDetected: false,
+      now: t0 + 25000,
+    });
+    assert.ok(lostCandle !== null);
+    assert.equal(lostCandle.anchor, null);
+
+    // 6. Confirmed M1 VENDA (>= 65% temporary test threshold) switches AGUARDANDO -> VENDA above the candle and stays inside chartBounds when near top/right edges
+    const edgeCandle = {
+      ...liveHigher,
+      x: bounds.x + bounds.width - 0.005,
+      y: bounds.y + 0.02,
+      topY: bounds.y + 0.01,
+      chartRelativeX: 0.99,
+      chartRelativeY: 0.02,
+      chartBounds: bounds,
+    };
     const sellSig = {
       id: 'sig-sell-1',
       direction: 'VENDA' as const,
-      candleX: 0.72,
-      candleY: 0.56,
-      chartRelativeX: 0.87,
-      chartRelativeY: 0.62,
+      candleX: edgeCandle.x,
+      candleY: edgeCandle.y,
+      chartRelativeX: edgeCandle.chartRelativeX,
+      chartRelativeY: edgeCandle.chartRelativeY,
       chartBounds: bounds,
-      confidence: 92,
+      confidence: 65,
       candleId: 'm1-right-sell',
       marketRegime: 'TRENDING_DOWN' as const,
-      createdAt: t0 + 25000,
-      expiresAt: t0 + 43000,
+      createdAt: t0 + 26000,
+      expiresAt: t0 + 44000,
     };
     const sellState = resolveOperationalStatus({
       isActive: true,
       current: afterBuyExpire,
       activeSignal: sellSig,
+      liveCandle: edgeCandle,
       latestBounds: bounds,
-      now: t0 + 26000,
+      chartDetected: true,
+      now: t0 + 26500,
     });
-    assert.ok(sellState !== null);
+    assert.ok(sellState !== null && sellState.anchor !== null);
     assert.equal(sellState.status, 'VENDA');
-    assert.equal(sellState.confidence, 92);
+    assert.ok(sellState.anchor.x >= bounds.x && sellState.anchor.x <= bounds.x + bounds.width);
+    assert.ok(sellState.anchor.y >= bounds.y && sellState.anchor.y <= bounds.y + bounds.height);
 
-    const afterSellExpire = resolveOperationalStatus({
-      isActive: true,
-      current: sellState,
-      activeSignal: null,
-      latestBounds: bounds,
-      now: t0 + 44000,
-    });
-    assert.ok(afterSellExpire !== null);
-    assert.equal(afterSellExpire.status, 'AGUARDANDO');
-
-    // 6. Deactivating clears operational status cleanly
+    // 7. Deactivating clears operational status completely
     const deactivated = resolveOperationalStatus({
       isActive: false,
-      current: afterSellExpire,
+      current: sellState,
       activeSignal: null,
+      liveCandle: edgeCandle,
       latestBounds: bounds,
+      chartDetected: true,
       now: t0 + 45000,
     });
     assert.equal(deactivated, null);
   });
 
-  it('enforces M1 prompt rules without 30s logic and preserves 90% confidence + Netlify/Windows status endpoints', async () => {
-    assert.equal(MIN_SIGNAL_CONFIDENCE, 90);
+  it('enforces M1 prompt rules without 30s logic and enforces temporary 65% threshold + Netlify Function validation', async () => {
+    assert.equal(MIN_SIGNAL_CONFIDENCE, 65);
+    assert.equal(PRODUCTION_MIN_SIGNAL_CONFIDENCE, 90);
     const analyzeCoreSrc = fs.readFileSync(path.resolve('server/analyzeFrameCore.ts'), 'utf8');
     assert.match(analyzeCoreSrc, /1 MINUTO \(M1\)/);
     assert.doesNotMatch(analyzeCoreSrc, /30\s*segundos|timeframe\s*30s|M30s/i);
@@ -1345,20 +1513,54 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     const stateJson = (await stateRes.json()) as { operationalStatus?: unknown };
     assert.equal(stateJson.operationalStatus, null);
 
-    const statusReq = new Request('https://example.netlify.app/api/overlay/status', {
+    // Below 65% confidence on COMPRA must be downgraded to AGUARDANDO by Netlify overlay-status
+    const rejectedStatusReq = new Request('https://example.netlify.app/api/overlay/status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId: 'sess-m1-status',
-        operationalStatus: { status: 'AGUARDANDO', timeframe: 'M1', confidence: 0 },
+        operationalStatus: {
+          status: 'COMPRA',
+          timeframe: 'M1',
+          confidence: 64,
+          anchor: { x: 0.72, y: 0.35, chartRelativeX: 0.84, chartRelativeY: 0.33 },
+        },
       }),
     });
-    const statusRes = await netlifyOverlayStatusHandler(statusReq);
-    assert.equal(statusRes.status, 200);
-    const statusBody = (await statusRes.json()) as { ok: boolean; status: string; timeframe: string };
-    assert.equal(statusBody.ok, true);
-    assert.equal(statusBody.status, 'AGUARDANDO');
-    assert.equal(statusBody.timeframe, 'M1');
+    const rejectedStatusRes = await netlifyOverlayStatusHandler(rejectedStatusReq);
+    assert.equal(rejectedStatusRes.status, 200);
+    const rejectedStatusBody = (await rejectedStatusRes.json()) as {
+      ok: boolean;
+      status: string;
+    };
+    assert.equal(rejectedStatusBody.status, 'AGUARDANDO');
+
+    // >= 65% confidence on COMPRA is accepted by Netlify overlay-status
+    const acceptedStatusReq = new Request('https://example.netlify.app/api/overlay/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-m1-status',
+        operationalStatus: {
+          status: 'COMPRA',
+          timeframe: 'M1',
+          confidence: 66,
+          anchor: { x: 0.72, y: 0.35, chartRelativeX: 0.84, chartRelativeY: 0.33 },
+        },
+      }),
+    });
+    const acceptedStatusRes = await netlifyOverlayStatusHandler(acceptedStatusReq);
+    assert.equal(acceptedStatusRes.status, 200);
+    const acceptedStatusBody = (await acceptedStatusRes.json()) as {
+      ok: boolean;
+      status: string;
+      timeframe: string;
+      hasAnchor: boolean;
+    };
+    assert.equal(acceptedStatusBody.ok, true);
+    assert.equal(acceptedStatusBody.status, 'COMPRA');
+    assert.equal(acceptedStatusBody.timeframe, 'M1');
+    assert.equal(acceptedStatusBody.hasAnchor, true);
 
     const toml = fs.readFileSync(path.resolve('netlify.toml'), 'utf8');
     assert.match(toml, /from\s*=\s*"\/api\/overlay\/status"/);
@@ -1372,8 +1574,10 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     assert.match(cs, /\\"version\\":\\"1\.3\.0\\"/);
     assert.match(cs, /operationalStatusSupported/);
     assert.match(cs, /"\/overlay\/status"/);
-    assert.match(cs, /UpdateOperationalStatus/);
+    assert.match(cs, /HasStatusAnchor/);
+    assert.match(cs, /_smoothStatusNormX/);
     assert.match(cs, /AGUARDANDO/);
   });
 });
+
 

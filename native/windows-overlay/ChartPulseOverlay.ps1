@@ -98,7 +98,8 @@ $form.Add_Paint({
     $dir = if ($null -ne $state.signal) { [string]$state.signal.direction } else { "" }
     $hasSignal = ($dir -eq "COMPRA" -or $dir -eq "VENDA")
     $opStatus = if ($null -ne $state.operationalStatus -and $state.operationalStatus.status) { [string]$state.operationalStatus.status } elseif ($hasSignal) { $dir } else { "AGUARDANDO" }
-    $hasOpStatus = [bool]$state.active
+    $opAnchor = if ($null -ne $state.operationalStatus -and $null -ne $state.operationalStatus.anchor) { $state.operationalStatus.anchor } else { $null }
+    $hasOpStatus = [bool]$state.active -and ($null -ne $opAnchor)
 
     if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasSignal -and -not $hasOpStatus) {
         return
@@ -108,10 +109,16 @@ $form.Add_Paint({
 
     if ($hasOpStatus) {
         $sBounds = if ($null -ne $state.operationalStatus -and $null -ne $state.operationalStatus.chartBounds) { $state.operationalStatus.chartBounds } else { $state.chartBounds }
-        $anchorBx = if ($null -ne $sBounds) { [double]$sBounds.x } else { 0.045 }
-        $anchorBy = if ($null -ne $sBounds) { [double]$sBounds.y } else { 0.04 }
-        $sx = [float]([Math]::Min(0.82, [Math]::Max(0.02, $anchorBx + 0.015)) * $form.ClientSize.Width)
-        $sy = [float]([Math]::Min(0.85, [Math]::Max(0.03, $anchorBy + 0.02)) * $form.ClientSize.Height)
+        if ($null -ne $sBounds -and $null -ne $opAnchor.chartRelativeX -and $null -ne $opAnchor.chartRelativeY) {
+            $normSX = [double]$sBounds.x + ([double]$opAnchor.chartRelativeX * [double]$sBounds.width)
+            $normSY = [double]$sBounds.y + ([double]$opAnchor.chartRelativeY * [double]$sBounds.height)
+        } else {
+            $normSX = [double]$opAnchor.x
+            $normSY = [double]$opAnchor.y
+        }
+
+        $anchorPxX = [float]([Math]::Max(0.02, [Math]::Min(0.98, $normSX)) * $form.ClientSize.Width)
+        $anchorPxY = [float]([Math]::Max(0.02, [Math]::Min(0.98, $normSY)) * $form.ClientSize.Height)
 
         $stColor = if ($opStatus -eq "COMPRA") {
             [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
@@ -128,9 +135,20 @@ $form.Add_Paint({
         $stBorder = New-Object System.Drawing.Pen($stColor, 1)
         $stBrush = New-Object System.Drawing.SolidBrush($stColor)
         $stSize = $g.MeasureString($opStatus, $stFont)
-        $g.FillRectangle($stBg, $sx, $sy, $stSize.Width + 14, $stSize.Height + 6)
-        $g.DrawRectangle($stBorder, $sx, $sy, $stSize.Width + 14, $stSize.Height + 6)
-        $g.DrawString($opStatus, $stFont, $stBrush, $sx + 7, $sy + 3)
+        $boxW = $stSize.Width + 14
+        $boxH = $stSize.Height + 6
+        $drawX = $anchorPxX - ($boxW / 2)
+        $drawY = $anchorPxY - $boxH
+        $minLeft = if ($null -ne $sBounds) { [float]([double]$sBounds.x * $form.ClientSize.Width) + 4 } else { 4 }
+        $maxRight = if ($null -ne $sBounds) { [float](([double]$sBounds.x + [double]$sBounds.width) * $form.ClientSize.Width) - 4 } else { $form.ClientSize.Width - 4 }
+        $minTop = if ($null -ne $sBounds) { [float]([double]$sBounds.y * $form.ClientSize.Height) + 4 } else { 4 }
+        $maxBot = if ($null -ne $sBounds) { [float](([double]$sBounds.y + [double]$sBounds.height) * $form.ClientSize.Height) - 4 } else { $form.ClientSize.Height - 4 }
+        $drawX = [Math]::Max($minLeft, [Math]::Min([Math]::Max($minLeft, $maxRight - $boxW), $drawX))
+        $drawY = [Math]::Max($minTop, [Math]::Min([Math]::Max($minTop, $maxBot - $boxH), $drawY))
+
+        $g.FillRectangle($stBg, $drawX, $drawY, $boxW, $boxH)
+        $g.DrawRectangle($stBorder, $drawX, $drawY, $boxW, $boxH)
+        $g.DrawString($opStatus, $stFont, $stBrush, $drawX + 7, $drawY + 3)
         $stFont.Dispose()
         $stBg.Dispose()
         $stBorder.Dispose()

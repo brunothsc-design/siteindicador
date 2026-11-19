@@ -118,6 +118,11 @@ namespace ChartPulseOverlayAgent
         public double StatusBoundsY;
         public double StatusBoundsW;
         public double StatusBoundsH;
+        public bool HasStatusAnchor;
+        public double StatusAnchorX;
+        public double StatusAnchorY;
+        public double StatusRelativeX;
+        public double StatusRelativeY;
         public long StatusUpdatedAtMs;
 
         public OverlayPayload Clone()
@@ -138,6 +143,9 @@ namespace ChartPulseOverlayAgent
         private long _signalUpdates;
         private long _paintCount;
         private Rectangle _lastTargetBounds = new Rectangle(0, 0, 1, 1);
+        private bool _hasSmoothedStatus;
+        private double _smoothStatusNormX;
+        private double _smoothStatusNormY;
 
         private static readonly HashSet<string> IgnoredClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -252,7 +260,11 @@ namespace ChartPulseOverlayAgent
             {
                 _state = new OverlayPayload();
             }
-            RequestRepaint();
+            BeginInvoke((Action)(() =>
+            {
+                _hasSmoothedStatus = false;
+                Invalidate();
+            }));
         }
 
         public void UpdatePriceLine(
@@ -340,7 +352,12 @@ namespace ChartPulseOverlayAgent
             double bx,
             double by,
             double bw,
-            double bh)
+            double bh,
+            bool hasAnchor,
+            double anchorX,
+            double anchorY,
+            double relX,
+            double relY)
         {
             string safeStatus = (status == "COMPRA" || status == "VENDA") ? status : "AGUARDANDO";
             lock (_stateLock)
@@ -362,6 +379,14 @@ namespace ChartPulseOverlayAgent
                     _state.StatusBoundsY = by;
                     _state.StatusBoundsW = bw;
                     _state.StatusBoundsH = bh;
+                }
+                _state.HasStatusAnchor = hasAnchor;
+                if (hasAnchor)
+                {
+                    _state.StatusAnchorX = anchorX;
+                    _state.StatusAnchorY = anchorY;
+                    _state.StatusRelativeX = relX;
+                    _state.StatusRelativeY = relY;
                 }
                 _state.StatusUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
@@ -479,6 +504,42 @@ namespace ChartPulseOverlayAgent
                 Invalidate();
             }
 
+            if (snapshot.Active && snapshot.HasStatusAnchor)
+            {
+                double targetNormX = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsX + snapshot.StatusRelativeX * snapshot.StatusBoundsW
+                    : snapshot.StatusAnchorX;
+                double targetNormY = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsY + snapshot.StatusRelativeY * snapshot.StatusBoundsH
+                    : snapshot.StatusAnchorY;
+
+                if (!_hasSmoothedStatus)
+                {
+                    _smoothStatusNormX = targetNormX;
+                    _smoothStatusNormY = targetNormY;
+                    _hasSmoothedStatus = true;
+                    Invalidate();
+                }
+                else
+                {
+                    double dx = targetNormX - _smoothStatusNormX;
+                    double dy = targetNormY - _smoothStatusNormY;
+                    if (Math.Abs(dx) >= 0.0005 || Math.Abs(dy) >= 0.0005)
+                    {
+                        _smoothStatusNormX += dx * 0.42;
+                        _smoothStatusNormY += dy * 0.42;
+                        if (Math.Abs(targetNormX - _smoothStatusNormX) < 0.0005) _smoothStatusNormX = targetNormX;
+                        if (Math.Abs(targetNormY - _smoothStatusNormY) < 0.0005) _smoothStatusNormY = targetNormY;
+                        Invalidate();
+                    }
+                }
+            }
+            else if (_hasSmoothedStatus)
+            {
+                _hasSmoothedStatus = false;
+                Invalidate();
+            }
+
             IntPtr fg = Win32Native.GetForegroundWindow();
             if (fg != IntPtr.Zero && fg != Handle)
             {
@@ -578,7 +639,7 @@ namespace ChartPulseOverlayAgent
             bool hasSignal = snapshot.Active && (snapshot.Direction == "COMPRA" || snapshot.Direction == "VENDA");
             bool hasPriceLine = snapshot.Active && snapshot.HasPriceLine;
             bool hasLiveCandle = snapshot.Active && snapshot.HasLiveCandle;
-            bool hasOpStatus = snapshot.Active;
+            bool hasOpStatus = snapshot.Active && snapshot.HasStatusAnchor;
 
             if (!hasSignal && !hasPriceLine && !hasLiveCandle && !hasOpStatus)
             {
@@ -594,23 +655,18 @@ namespace ChartPulseOverlayAgent
                     ? snapshot.OperationalStatus
                     : (hasSignal ? snapshot.Direction : "AGUARDANDO");
 
-                double anchorBx = snapshot.HasStatusBounds
-                    ? snapshot.StatusBoundsX
-                    : (snapshot.HasPriceBounds
-                        ? snapshot.PriceBoundsX
-                        : (snapshot.HasLiveCandleBounds
-                            ? snapshot.LiveCandleBoundsX
-                            : (snapshot.HasBounds ? snapshot.BoundsX : 0.045)));
-                double anchorBy = snapshot.HasStatusBounds
-                    ? snapshot.StatusBoundsY
-                    : (snapshot.HasPriceBounds
-                        ? snapshot.PriceBoundsY
-                        : (snapshot.HasLiveCandleBounds
-                            ? snapshot.LiveCandleBoundsY
-                            : (snapshot.HasBounds ? snapshot.BoundsY : 0.04)));
+                double targetNormX = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsX + snapshot.StatusRelativeX * snapshot.StatusBoundsW
+                    : snapshot.StatusAnchorX;
+                double targetNormY = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsY + snapshot.StatusRelativeY * snapshot.StatusBoundsH
+                    : snapshot.StatusAnchorY;
 
-                float sx = (float)(Math.Min(0.82, Math.Max(0.02, anchorBx + 0.015)) * ClientSize.Width);
-                float sy = (float)(Math.Min(0.85, Math.Max(0.03, anchorBy + 0.02)) * ClientSize.Height);
+                double normStatusX = _hasSmoothedStatus ? _smoothStatusNormX : targetNormX;
+                double normStatusY = _hasSmoothedStatus ? _smoothStatusNormY : targetNormY;
+
+                float anchorPxX = (float)(Math.Max(0.02, Math.Min(0.98, normStatusX)) * ClientSize.Width);
+                float anchorPxY = (float)(Math.Max(0.02, Math.Min(0.98, normStatusY)) * ClientSize.Height);
 
                 Color statusColor = statusText == "COMPRA"
                     ? Color.FromArgb(255, 34, 197, 94)
@@ -628,10 +684,34 @@ namespace ChartPulseOverlayAgent
                     SizeF stSize = g.MeasureString(statusText, statusFont);
                     float padX = 7f;
                     float padY = 3f;
-                    RectangleF box = new RectangleF(sx, sy, stSize.Width + padX * 2f, stSize.Height + padY * 2f);
+                    float boxW = stSize.Width + padX * 2f;
+                    float boxH = stSize.Height + padY * 2f;
+
+                    // Centered horizontally on the candle and directly above it (anchor = bottom-center)
+                    float drawX = anchorPxX - (boxW / 2f);
+                    float drawY = anchorPxY - boxH;
+
+                    // Strictly clamp inside chartBounds (or window client area) so indicator never overflows
+                    float minLeft = snapshot.HasStatusBounds
+                        ? (float)(snapshot.StatusBoundsX * ClientSize.Width) + 4f
+                        : 4f;
+                    float maxRight = snapshot.HasStatusBounds
+                        ? (float)((snapshot.StatusBoundsX + snapshot.StatusBoundsW) * ClientSize.Width) - 4f
+                        : ClientSize.Width - 4f;
+                    float minTop = snapshot.HasStatusBounds
+                        ? (float)(snapshot.StatusBoundsY * ClientSize.Height) + 4f
+                        : 4f;
+                    float maxBottom = snapshot.HasStatusBounds
+                        ? (float)((snapshot.StatusBoundsY + snapshot.StatusBoundsH) * ClientSize.Height) - 4f
+                        : ClientSize.Height - 4f;
+
+                    drawX = Math.Max(minLeft, Math.Min(Math.Max(minLeft, maxRight - boxW), drawX));
+                    drawY = Math.Max(minTop, Math.Min(Math.Max(minTop, maxBottom - boxH), drawY));
+
+                    RectangleF box = new RectangleF(drawX, drawY, boxW, boxH);
                     g.FillRectangle(statusBg, box);
                     g.DrawRectangle(statusBorder, box.X, box.Y, box.Width, box.Height);
-                    g.DrawString(statusText, statusFont, statusBrush, sx + padX, sy + padY);
+                    g.DrawString(statusText, statusFont, statusBrush, drawX + padX, drawY + padY);
                 }
             }
 
@@ -1097,9 +1177,10 @@ namespace ChartPulseOverlayAgent
                 string statusObj = ExtractJsonObject(bodyText, "operationalStatus");
                 string statusSource = string.IsNullOrEmpty(statusObj) ? bodyText : statusObj;
                 string boundsObj = ExtractJsonObject(statusSource, "chartBounds");
-                string statusShallow = string.IsNullOrEmpty(boundsObj)
-                    ? statusSource
-                    : statusSource.Replace(boundsObj, "{}");
+                string anchorObj = ExtractJsonObject(statusSource, "anchor");
+                string statusShallow = statusSource;
+                if (!string.IsNullOrEmpty(boundsObj)) statusShallow = statusShallow.Replace(boundsObj, "{}");
+                if (!string.IsNullOrEmpty(anchorObj)) statusShallow = statusShallow.Replace(anchorObj, "{}");
 
                 string statusVal = ExtractJsonString(statusShallow, "status");
                 bool hasBounds = false;
@@ -1113,11 +1194,35 @@ namespace ChartPulseOverlayAgent
                     hasBounds = bw > 0.05 && bh > 0.05;
                 }
 
-                _overlayForm.UpdateOperationalStatus(sessionId, statusVal, hasBounds, bx, by, bw, bh);
+                bool hasAnchor = !string.IsNullOrEmpty(anchorObj);
+                double ax = 0, ay = 0, relX = 0, relY = 0;
+                if (hasAnchor)
+                {
+                    ax = ExtractJsonDouble(anchorObj, "x", -1);
+                    ay = ExtractJsonDouble(anchorObj, "y", -1);
+                    relX = ExtractJsonDouble(anchorObj, "chartRelativeX", ax);
+                    relY = ExtractJsonDouble(anchorObj, "chartRelativeY", ay);
+                    hasAnchor = ax >= 0 && ax <= 1 && ay >= 0 && ay <= 1;
+                }
+
+                _overlayForm.UpdateOperationalStatus(
+                    sessionId,
+                    statusVal,
+                    hasBounds,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                    hasAnchor,
+                    ax,
+                    ay,
+                    relX,
+                    relY
+                );
                 _statusLogTick++;
                 if (_statusLogTick == 1 || _statusLogTick % 20 == 0 || statusVal == "COMPRA" || statusVal == "VENDA")
                 {
-                    WriteDiagnosticLog(string.Format("OP_STATUS status={0} hasBounds={1}", statusVal, hasBounds));
+                    WriteDiagnosticLog(string.Format("OP_STATUS status={0} hasAnchor={1} ax={2:0.000} ay={3:0.000}", statusVal, hasAnchor, ax, ay));
                 }
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;

@@ -50,11 +50,21 @@ export interface LiveCandleTracker {
 
 export type OperationalStatusValue = 'AGUARDANDO' | 'COMPRA' | 'VENDA';
 
+export interface OperationalStatusAnchor {
+  x: number; // normalized 0..1 horizontal center of the forming candle
+  y: number; // normalized 0..1 bottom anchor directly above the candle top
+  chartRelativeX: number; // normalized 0..1 relative to chartBounds
+  chartRelativeY: number; // normalized 0..1 relative to chartBounds
+  candleTopY: number; // normalized 0..1 top edge of the forming candle
+  updatedAt: number;
+}
+
 export interface OperationalStatusState {
   status: OperationalStatusValue;
   timeframe: 'M1';
   confidence: number;
   chartBounds: ChartBounds | null;
+  anchor: OperationalStatusAnchor | null;
   expiresAt: number | null;
   updatedAt: number;
 }

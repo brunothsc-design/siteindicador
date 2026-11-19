@@ -1,3 +1,4 @@
+import { isSignalConfidenceValid } from '../config/signalConfig.ts';
 import type {
   LiveCandleTracker,
   OperationalStatusState,
@@ -29,9 +30,12 @@ export function SignalOverlay({
   operationalStatus = null,
   rect,
 }: SignalOverlayProps) {
+  const validSignal =
+    signal && isSignalConfidenceValid(signal.confidence) ? signal : null;
+  const statusAnchor = operationalStatus?.anchor ?? null;
   if (
     !active ||
-    (!signal && !priceLine && !liveCandle && !operationalStatus) ||
+    (!validSignal && !priceLine && !liveCandle && !statusAnchor) ||
     !rect ||
     rect.width <= 0 ||
     rect.height <= 0
@@ -67,9 +71,28 @@ export function SignalOverlay({
         ? '#F43F5E'
         : '#FBBF24';
 
-  const statusBounds = operationalStatus?.chartBounds ?? lineBounds ?? candleBounds ?? signal?.chartBounds ?? null;
-  const statusLeft = statusBounds ? Math.min(0.82, Math.max(0.02, statusBounds.x + 0.015)) : 0.06;
-  const statusTop = statusBounds ? Math.min(0.85, Math.max(0.03, statusBounds.y + 0.02)) : 0.06;
+  const statusBounds = operationalStatus?.chartBounds ?? candleBounds ?? lineBounds ?? validSignal?.chartBounds ?? null;
+  let statusLeft = statusAnchor
+    ? statusBounds
+      ? statusBounds.x + statusAnchor.chartRelativeX * statusBounds.width
+      : statusAnchor.x
+    : 0;
+  let statusTop = statusAnchor
+    ? statusBounds
+      ? statusBounds.y + statusAnchor.chartRelativeY * statusBounds.height
+      : statusAnchor.y
+    : 0;
+
+  if (statusAnchor && statusBounds) {
+    const padX = Math.min(0.012, statusBounds.width * 0.04);
+    const minLeft = statusBounds.x + padX;
+    const maxLeft = Math.max(minLeft, statusBounds.x + statusBounds.width - padX);
+    const minTop = statusBounds.y + Math.min(0.045, statusBounds.height * 0.16);
+    const maxTop = Math.max(minTop, statusBounds.y + statusBounds.height - 0.015);
+    statusLeft = Math.max(minLeft, Math.min(maxLeft, statusLeft));
+    statusTop = Math.max(minTop, Math.min(maxTop, statusTop));
+  }
+
   const statusColor =
     operationalStatus?.status === 'COMPRA'
       ? '#22C55E'
@@ -77,16 +100,16 @@ export function SignalOverlay({
         ? '#EF4444'
         : '#FBBF24';
 
-  const isBuy = signal?.direction === 'COMPRA';
-  const posX = signal
-    ? signal.chartBounds
-      ? signal.chartBounds.x + signal.chartRelativeX * signal.chartBounds.width
-      : signal.candleX
+  const isBuy = validSignal?.direction === 'COMPRA';
+  const posX = validSignal
+    ? validSignal.chartBounds
+      ? validSignal.chartBounds.x + validSignal.chartRelativeX * validSignal.chartBounds.width
+      : validSignal.candleX
     : 0;
-  const posY = signal
-    ? signal.chartBounds
-      ? signal.chartBounds.y + signal.chartRelativeY * signal.chartBounds.height
-      : signal.candleY
+  const posY = validSignal
+    ? validSignal.chartBounds
+      ? validSignal.chartBounds.y + validSignal.chartRelativeY * validSignal.chartBounds.height
+      : validSignal.candleY
     : 0;
 
   return (
@@ -100,14 +123,15 @@ export function SignalOverlay({
         height: `${rect.height}px`,
       }}
     >
-      {operationalStatus && (
+      {operationalStatus && statusAnchor && (
         <div
-          className="absolute font-mono font-bold tracking-wider text-xs sm:text-sm px-2 py-0.5 rounded transition-colors duration-150"
+          className="absolute font-mono font-bold tracking-wider text-xs sm:text-sm px-2 py-0.5 rounded whitespace-nowrap transition-[left,top,color,border-color] duration-200 ease-out"
           style={{
             left: `${statusLeft * 100}%`,
             top: `${statusTop * 100}%`,
+            transform: 'translate(-50%, -100%)',
             color: statusColor,
-            backgroundColor: 'rgba(11, 14, 17, 0.72)',
+            backgroundColor: 'rgba(11, 14, 17, 0.78)',
             border: `1px solid ${statusColor}`,
             boxShadow: '0 2px 6px rgba(0, 0, 0, 0.85)',
           }}
@@ -154,7 +178,7 @@ export function SignalOverlay({
         </div>
       )}
 
-      {signal && (
+      {validSignal && (
         <div
           className="absolute -translate-x-1/2 -translate-y-1/2 font-mono font-bold tracking-wider text-sm sm:text-base transition-opacity duration-150"
           style={{
@@ -165,7 +189,7 @@ export function SignalOverlay({
               '0 1px 2px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,1)',
           }}
         >
-          {signal.direction}
+          {validSignal.direction}
         </div>
       )}
     </div>

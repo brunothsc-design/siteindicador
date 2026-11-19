@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalOverlay, type VideoDisplayRect } from './components/SignalOverlay.tsx';
+import { isSignalConfidenceValid } from './config/signalConfig.ts';
 import { detectLiveMovingCandle } from './engine/liveCandleTracker.ts';
 import { processFrameLocally } from './engine/localScreenProcessor.ts';
 import {
@@ -219,7 +220,12 @@ export default function App() {
   }, []);
 
   const syncOperationalStatusState = useCallback(
-    (latestBounds: ChartBounds | null, forcePush = false) => {
+    (
+      latestBounds: ChartBounds | null,
+      forcePush = false,
+      latestCandle: LiveCandleTracker | null = lastLiveCandleRef.current,
+      chartDetected = true
+    ) => {
       if (!isActiveRef.current || !sessionIdRef.current) return;
       const now = Date.now();
       if (latestBounds) {
@@ -235,7 +241,9 @@ export default function App() {
         isActive: isActiveRef.current,
         current: lastOperationalStatusRef.current,
         activeSignal: lastSignalRef.current,
+        liveCandle: latestCandle,
         latestBounds: latestBounds ?? lastChartBoundsRef.current,
+        chartDetected,
         now,
       });
 
@@ -356,10 +364,15 @@ export default function App() {
       lastChartBoundsRef.current = local.chartBounds;
     }
 
-    // Keep permanent operational status synced without flickering between captures
-    syncOperationalStatusState(local.chartBounds ?? lastChartBoundsRef.current);
+    // Keep permanent operational status anchored directly above the detected forming candle without flicker
+    syncOperationalStatusState(
+      local.chartBounds ?? lastChartBoundsRef.current,
+      false,
+      nextCandle,
+      local.chartDetected
+    );
 
-    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}`;
+    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}`;
     if (diagKey !== lastDiagStateRef.current) {
       lastDiagStateRef.current = diagKey;
       console.info('[ChartPulse:Diag]', {
@@ -367,6 +380,7 @@ export default function App() {
         chartDetected: local.chartDetected,
         chartBounds: local.chartBounds,
         operationalStatus: lastOperationalStatusRef.current?.status ?? null,
+        statusAnchor: lastOperationalStatusRef.current?.anchor ?? null,
         priceLine: nextPrice
           ? { y: nextPrice.y, source: nextPrice.source, conf: nextPrice.confidence }
           : null,
@@ -481,7 +495,11 @@ export default function App() {
 
       setErrorMessage(null);
 
-      if (result.signal === 'COMPRA' || result.signal === 'VENDA') {
+      const hasValidSignal =
+        (result.signal === 'COMPRA' || result.signal === 'VENDA') &&
+        isSignalConfidenceValid(result.confidence);
+
+      if (hasValidSignal && (result.signal === 'COMPRA' || result.signal === 'VENDA')) {
         const prev = lastSignalRef.current;
         const isDuplicate =
           prev !== null &&
@@ -595,7 +613,7 @@ export default function App() {
         deactivate();
       };
 
-      const initialOpStatus = createInitialOperationalStatus(null, Date.now());
+      const initialOpStatus = createInitialOperationalStatus(null, null, Date.now());
       lastOperationalStatusRef.current = initialOpStatus;
       lastStatusPushAtRef.current = Date.now();
       lastChartBoundsRef.current = null;
