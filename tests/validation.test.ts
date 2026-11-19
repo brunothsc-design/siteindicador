@@ -8,6 +8,7 @@ import {
   type CandleBar,
 } from '../src/engine/candleAnalysis.ts';
 import { processFrameLocally } from '../src/engine/localScreenProcessor.ts';
+import { detectLiveMovingCandle } from '../src/engine/liveCandleTracker.ts';
 import {
   checkDisplayCaptureEnvironment,
   classifyDisplayCaptureError,
@@ -25,6 +26,7 @@ import netlifyOverlaySessionHandler from '../netlify/functions/overlay-session.t
 import netlifyOverlayClearHandler from '../netlify/functions/overlay-clear.ts';
 import netlifyOverlayStateHandler from '../netlify/functions/overlay-state.ts';
 import netlifyOverlayPriceHandler from '../netlify/functions/overlay-price.ts';
+import netlifyOverlayCandleHandler from '../netlify/functions/overlay-candle.ts';
 
 function createSeededRng(seed: number): () => number {
   let s = seed >>> 0;
@@ -897,5 +899,166 @@ describe('ChartPulse AI — Real-Time Price Tracking Line & Windows Overlay Sync
     assert.match(cs, /UpdatePriceLine/);
     assert.match(cs, /HasPriceLine/);
     assert.match(cs, /priceLineSupported/);
+  });
+});
+
+describe('ChartPulse AI — Additional Live Forming Candle Tracking', () => {
+  it('tracks the most recent forming candle vertically and horizontally without modifying priceLine or 90% signals', () => {
+    const upFrame = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.34,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
+    });
+    const upDigest = processFrameLocally(upFrame, 640, 360, null);
+    assert.equal(upDigest.chartDetected, true);
+    assert.ok(upDigest.priceLine !== null);
+
+    const upCandle = detectLiveMovingCandle(
+      upFrame,
+      640,
+      360,
+      upDigest.chartBounds,
+      upDigest.priceLine
+    );
+    assert.ok(upCandle !== null);
+    assert.equal(upCandle.direction, 'BEAR');
+    assert.ok(
+      Math.abs(upCandle.y - 0.34) <= 0.02,
+      `Expected forming candle y near 0.34, got ${upCandle.y}`
+    );
+    assert.ok(upCandle.x > 0.5 && upCandle.x < 0.8);
+
+    const downFrame = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.64,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
+    });
+    const downDigest = processFrameLocally(downFrame, 640, 360, upDigest.signature);
+    const downCandle = detectLiveMovingCandle(
+      downFrame,
+      640,
+      360,
+      downDigest.chartBounds,
+      downDigest.priceLine
+    );
+    assert.ok(downCandle !== null);
+    assert.ok(downCandle.y > upCandle.y + 0.25);
+
+    // Existing 90% precision filter remains untouched
+    assert.equal(MIN_SIGNAL_CONFIDENCE, 90);
+    const rejected89 = applySignalPrecisionFilter({
+      chartDetected: true,
+      rawSignal: 'COMPRA',
+      confidence: 89,
+      rawRegime: 'TRENDING_UP',
+    });
+    assert.equal(rejected89.signal, 'NONE');
+  });
+
+  it('tracks colored forming candle close even without a horizontal priceLine, and returns null when ambiguous or missing chart', () => {
+    const coloredOnly = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [16, 185, 129],
+      bearColor: [244, 63, 94],
+      priceRowFrac: 0.48,
+      drawPriceLine: false,
+      drawRightAxisPill: true,
+      drawGridLines: false,
+    });
+    const digest = processFrameLocally(coloredOnly, 640, 360, null);
+    assert.equal(digest.chartDetected, true);
+    const live = detectLiveMovingCandle(coloredOnly, 640, 360, digest.chartBounds, null);
+    assert.ok(live !== null);
+    assert.ok(Math.abs(live.y - 0.48) <= 0.02);
+
+    const empty = new Uint8ClampedArray(640 * 360 * 4);
+    assert.equal(detectLiveMovingCandle(empty, 640, 360, digest.chartBounds, null), null);
+    assert.equal(detectLiveMovingCandle(coloredOnly, 640, 360, null, null), null);
+
+    const ambiguousMono = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [0, 0, 0],
+      bullColor: [0, 255, 0],
+      bearColor: [255, 255, 255],
+      priceRowFrac: 0.45,
+      drawPriceLine: false,
+      drawRightAxisPill: false,
+      drawGridLines: false,
+      monochromeRightmost: true,
+    });
+    const monoDigest = processFrameLocally(ambiguousMono, 640, 360, null);
+    assert.equal(
+      detectLiveMovingCandle(ambiguousMono, 640, 360, monoDigest.chartBounds, null),
+      null
+    );
+  });
+
+  it('verifies Netlify overlay-candle, overlay-state, redirects, and Windows C# agent v1.2.0 contract', async () => {
+    const stateRes = await netlifyOverlayStateHandler();
+    assert.equal(stateRes.status, 200);
+    const stateJson = (await stateRes.json()) as { liveCandle: unknown; priceLine: unknown };
+    assert.equal(stateJson.liveCandle, null);
+    assert.equal(stateJson.priceLine, null);
+
+    const badReq = new Request('https://example.netlify.app/api/overlay/candle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const badRes = await netlifyOverlayCandleHandler(badReq);
+    assert.equal(badRes.status, 400);
+
+    const candleReq = new Request('https://example.netlify.app/api/overlay/candle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-candle-1',
+        liveCandle: {
+          x: 0.68,
+          y: 0.44,
+          chartRelativeX: 0.82,
+          chartRelativeY: 0.46,
+          topY: 0.38,
+          bottomY: 0.49,
+          direction: 'BULL',
+          chartBounds: { x: 0.05, y: 0.1, width: 0.78, height: 0.75 },
+          confidence: 0.88,
+          updatedAt: Date.now(),
+        },
+      }),
+    });
+    const candleRes = await netlifyOverlayCandleHandler(candleReq);
+    assert.equal(candleRes.status, 200);
+
+    const toml = fs.readFileSync(path.resolve('netlify.toml'), 'utf8');
+    assert.match(toml, /from\s*=\s*"\/api\/overlay\/candle"/);
+    assert.match(toml, /from\s*=\s*"\/api\/overlay-candle"/);
+
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /"\/overlay\/candle"/);
+    assert.match(cs, /UpdateLiveCandle/);
+    assert.match(cs, /HasLiveCandle/);
+    assert.match(cs, /liveCandleSupported/);
+    assert.match(cs, /\\"version\\":\\"1\.2\.0\\"/);
+    assert.match(cs, /"\/overlay\/price"/);
+    assert.match(cs, /"\/overlay\/signal"/);
   });
 });

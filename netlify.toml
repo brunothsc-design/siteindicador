@@ -75,6 +75,18 @@
   force = true
 
 [[redirects]]
+  from = "/api/overlay/candle"
+  to = "/.netlify/functions/overlay-candle"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-candle"
+  to = "/.netlify/functions/overlay-candle"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200

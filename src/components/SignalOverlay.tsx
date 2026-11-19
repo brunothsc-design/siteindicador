@@ -1,4 +1,4 @@
-import type { PriceLine, VisualSignal } from '../types/signals.ts';
+import type { LiveCandleTracker, PriceLine, VisualSignal } from '../types/signals.ts';
 
 export interface VideoDisplayRect {
   left: number;
@@ -11,11 +11,24 @@ interface SignalOverlayProps {
   active: boolean;
   signal: VisualSignal | null;
   priceLine?: PriceLine | null;
+  liveCandle?: LiveCandleTracker | null;
   rect: VideoDisplayRect | null;
 }
 
-export function SignalOverlay({ active, signal, priceLine = null, rect }: SignalOverlayProps) {
-  if (!active || (!signal && !priceLine) || !rect || rect.width <= 0 || rect.height <= 0) {
+export function SignalOverlay({
+  active,
+  signal,
+  priceLine = null,
+  liveCandle = null,
+  rect,
+}: SignalOverlayProps) {
+  if (
+    !active ||
+    (!signal && !priceLine && !liveCandle) ||
+    !rect ||
+    rect.width <= 0 ||
+    rect.height <= 0
+  ) {
     return null;
   }
 
@@ -28,6 +41,24 @@ export function SignalOverlay({ active, signal, priceLine = null, rect }: Signal
       : priceLine
         ? priceLine.y
         : 0;
+
+  const candleBounds = liveCandle?.chartBounds ?? null;
+  const liveX = liveCandle
+    ? candleBounds
+      ? candleBounds.x + liveCandle.chartRelativeX * candleBounds.width
+      : liveCandle.x
+    : 0;
+  const liveY = liveCandle
+    ? candleBounds
+      ? candleBounds.y + liveCandle.chartRelativeY * candleBounds.height
+      : liveCandle.y
+    : 0;
+  const liveColor =
+    liveCandle?.direction === 'BULL'
+      ? '#10B981'
+      : liveCandle?.direction === 'BEAR'
+        ? '#F43F5E'
+        : '#FBBF24';
 
   const isBuy = signal?.direction === 'COMPRA';
   const posX = signal
@@ -64,6 +95,30 @@ export function SignalOverlay({ active, signal, priceLine = null, rect }: Signal
             boxShadow: '0 0 4px rgba(0, 0, 0, 0.9), 0 1px 1px rgba(0, 0, 0, 0.95)',
           }}
         />
+      )}
+
+      {liveCandle && (
+        <div
+          className="absolute -translate-x-1/2 -translate-y-1/2 transition-[left,top] duration-150 ease-out"
+          style={{
+            left: `${liveX * 100}%`,
+            top: `${liveY * 100}%`,
+          }}
+        >
+          <div
+            className="w-4 h-4 rounded-full flex items-center justify-center"
+            style={{
+              border: `2px solid ${liveColor}`,
+              backgroundColor: 'rgba(11, 14, 17, 0.45)',
+              boxShadow: '0 0 6px rgba(0, 0, 0, 0.95)',
+            }}
+          >
+            <div
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: liveColor }}
+            />
+          </div>
+        </div>
       )}
 
       {signal && (

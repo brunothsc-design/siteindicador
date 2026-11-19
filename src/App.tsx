@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalOverlay, type VideoDisplayRect } from './components/SignalOverlay.tsx';
+import { detectLiveMovingCandle } from './engine/liveCandleTracker.ts';
 import { processFrameLocally } from './engine/localScreenProcessor.ts';
 import {
   checkLocalOverlayHealth,
   clearLocalOverlaySignals,
   notifyLocalOverlaySession,
+  pushLocalOverlayCandle,
   pushLocalOverlayPrice,
   pushLocalOverlaySignal,
   type OverlayConnectionState,
@@ -13,7 +15,12 @@ import {
   checkDisplayCaptureEnvironment,
   classifyDisplayCaptureError,
 } from './engine/screenCaptureGuard.ts';
-import type { AnalyzeFrameResponse, PriceLine, VisualSignal } from './types/signals.ts';
+import type {
+  AnalyzeFrameResponse,
+  LiveCandleTracker,
+  PriceLine,
+  VisualSignal,
+} from './types/signals.ts';
 
 const CAPTURE_POLL_MS = 2200;
 const PRICE_POLL_MS = 350;
@@ -42,10 +49,41 @@ function priceLineChanged(prev: PriceLine | null, next: PriceLine | null): boole
   return false;
 }
 
+function liveCandleChanged(
+  prev: LiveCandleTracker | null,
+  next: LiveCandleTracker | null
+): boolean {
+  if (prev === null && next === null) return false;
+  if (prev === null || next === null) return true;
+  if (prev.direction !== next.direction) return true;
+  if (Math.abs(prev.x - next.x) >= 0.002 || Math.abs(prev.y - next.y) >= 0.0015) return true;
+  if (
+    Math.abs(prev.chartRelativeX - next.chartRelativeX) >= 0.002 ||
+    Math.abs(prev.chartRelativeY - next.chartRelativeY) >= 0.0015
+  ) {
+    return true;
+  }
+  const pb = prev.chartBounds;
+  const nb = next.chartBounds;
+  if ((pb === null) !== (nb === null)) return true;
+  if (pb && nb) {
+    if (
+      Math.abs(pb.x - nb.x) >= 0.005 ||
+      Math.abs(pb.y - nb.y) >= 0.005 ||
+      Math.abs(pb.width - nb.width) >= 0.005 ||
+      Math.abs(pb.height - nb.height) >= 0.005
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export default function App() {
   const [isActive, setIsActive] = useState(false);
   const [activeSignal, setActiveSignal] = useState<VisualSignal | null>(null);
   const [priceLine, setPriceLine] = useState<PriceLine | null>(null);
+  const [liveCandle, setLiveCandle] = useState<LiveCandleTracker | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [videoRect, setVideoRect] = useState<VideoDisplayRect | null>(null);
   const [overlayStatus, setOverlayStatus] = useState<OverlayConnectionState>('checking');
@@ -68,6 +106,8 @@ export default function App() {
   const lastSignalRef = useRef<VisualSignal | null>(null);
   const lastPriceLineRef = useRef<PriceLine | null>(null);
   const lastPricePushAtRef = useRef(0);
+  const lastLiveCandleRef = useRef<LiveCandleTracker | null>(null);
+  const lastLiveCandlePushAtRef = useRef(0);
 
   const syncVideoRect = useCallback(() => {
     const video = videoRef.current;
@@ -109,6 +149,8 @@ export default function App() {
     lastSignalRef.current = null;
     lastPriceLineRef.current = null;
     lastPricePushAtRef.current = 0;
+    lastLiveCandleRef.current = null;
+    lastLiveCandlePushAtRef.current = 0;
     cooldownUntilRef.current = 0;
 
     if (timerRef.current !== null) {
@@ -141,6 +183,7 @@ export default function App() {
     setIsActive(false);
     setActiveSignal(null);
     setPriceLine(null);
+    setLiveCandle(null);
     setVideoRect(null);
 
     if (closingSession) {
@@ -207,6 +250,33 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionId: activeSession, priceLine: nextPrice }),
+        }).catch(() => {
+          // Non-fatal if backend overlay stream is not attached
+        });
+      }
+    }
+
+    // Separate forming-candle tracking indicator (independent from priceLine and COMPRA/VENDA signals)
+    const nextCandle = local.chartDetected
+      ? detectLiveMovingCandle(imgData.data, targetW, targetH, local.chartBounds, nextPrice)
+      : null;
+    const candleChanged = liveCandleChanged(lastLiveCandleRef.current, nextCandle);
+    const candleHeartbeatDue = nextCandle !== null && now - lastLiveCandlePushAtRef.current >= 1500;
+
+    if (candleChanged || candleHeartbeatDue) {
+      lastLiveCandleRef.current = nextCandle;
+      lastLiveCandlePushAtRef.current = now;
+      if (candleChanged) {
+        setLiveCandle(nextCandle);
+      }
+
+      const activeSession = sessionIdRef.current;
+      if (activeSession) {
+        void pushLocalOverlayCandle(activeSession, nextCandle);
+        void fetch('/api/overlay/candle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: activeSession, liveCandle: nextCandle }),
         }).catch(() => {
           // Non-fatal if backend overlay stream is not attached
         });
@@ -420,6 +490,7 @@ export default function App() {
       setIsActive(true);
       setActiveSignal(null);
       setPriceLine(null);
+      setLiveCandle(null);
 
       void notifyLocalOverlaySession(newSessionId).then((connected) => {
         setOverlayStatus(connected ? 'connected' : 'disconnected');
@@ -520,6 +591,7 @@ export default function App() {
             active={isActive}
             signal={activeSignal}
             priceLine={priceLine}
+            liveCandle={liveCandle}
             rect={videoRect}
           />
 

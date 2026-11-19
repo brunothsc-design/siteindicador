@@ -33,11 +33,27 @@ export interface PriceLine {
   updatedAt: number;
 }
 
+export type LiveCandleDirection = 'BULL' | 'BEAR' | 'NEUTRAL';
+
+export interface LiveCandleTracker {
+  x: number; // normalized 0..1 relative to captured frame
+  y: number; // normalized 0..1 relative to captured frame (live price on forming candle)
+  chartRelativeX: number; // normalized 0..1 relative to chartBounds
+  chartRelativeY: number; // normalized 0..1 relative to chartBounds
+  topY: number; // normalized 0..1 upper bound of forming candle
+  bottomY: number; // normalized 0..1 lower bound of forming candle
+  direction: LiveCandleDirection;
+  chartBounds: ChartBounds | null;
+  confidence: number; // 0..1
+  updatedAt: number;
+}
+
 export interface OverlayState {
   active: boolean;
   sessionId: string | null;
   signal: VisualSignal | null;
   priceLine: PriceLine | null;
+  liveCandle: LiveCandleTracker | null;
   chartBounds: ChartBounds | null;
   updatedAt: number;
 }

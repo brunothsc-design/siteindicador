@@ -8,4 +8,6 @@
 /api/overlay-state /.netlify/functions/overlay-state 200!
 /api/overlay/price /.netlify/functions/overlay-price 200!
 /api/overlay-price /.netlify/functions/overlay-price 200!
+/api/overlay/candle /.netlify/functions/overlay-candle 200!
+/api/overlay-candle /.netlify/functions/overlay-candle 200!
 /* /index.html 200

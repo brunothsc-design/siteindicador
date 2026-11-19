@@ -86,6 +86,19 @@ namespace ChartPulseOverlayAgent
         public double PriceBoundsH;
         public long PriceUpdatedAtMs;
 
+        public bool HasLiveCandle;
+        public double LiveCandleX = 0.5;
+        public double LiveCandleY = 0.5;
+        public double ChartRelativeLiveX = 0.5;
+        public double ChartRelativeLiveY = 0.5;
+        public string LiveCandleDirection = "NEUTRAL";
+        public bool HasLiveCandleBounds;
+        public double LiveCandleBoundsX;
+        public double LiveCandleBoundsY;
+        public double LiveCandleBoundsW;
+        public double LiveCandleBoundsH;
+        public long LiveCandleUpdatedAtMs;
+
         public OverlayPayload Clone()
         {
             return (OverlayPayload)MemberwiseClone();
@@ -192,6 +205,47 @@ namespace ChartPulseOverlayAgent
                 _state.PriceBoundsW = bw;
                 _state.PriceBoundsH = bh;
                 _state.PriceUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+            RequestRepaint();
+        }
+
+        public void UpdateLiveCandle(
+            string sessionId,
+            bool hasLiveCandle,
+            double candleX,
+            double candleY,
+            double chartRelativeX,
+            double chartRelativeY,
+            string direction,
+            bool hasLiveCandleBounds,
+            double bx,
+            double by,
+            double bw,
+            double bh)
+        {
+            lock (_stateLock)
+            {
+                if (_state.SessionId != sessionId)
+                {
+                    _state = new OverlayPayload
+                    {
+                        Active = true,
+                        SessionId = sessionId ?? string.Empty
+                    };
+                }
+                _state.Active = true;
+                _state.HasLiveCandle = hasLiveCandle;
+                _state.LiveCandleX = candleX;
+                _state.LiveCandleY = candleY;
+                _state.ChartRelativeLiveX = chartRelativeX;
+                _state.ChartRelativeLiveY = chartRelativeY;
+                _state.LiveCandleDirection = string.IsNullOrEmpty(direction) ? "NEUTRAL" : direction;
+                _state.HasLiveCandleBounds = hasLiveCandleBounds;
+                _state.LiveCandleBoundsX = bx;
+                _state.LiveCandleBoundsY = by;
+                _state.LiveCandleBoundsW = bw;
+                _state.LiveCandleBoundsH = bh;
+                _state.LiveCandleUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
             RequestRepaint();
         }
@@ -335,8 +389,9 @@ namespace ChartPulseOverlayAgent
 
             bool hasSignal = snapshot.Active && (snapshot.Direction == "COMPRA" || snapshot.Direction == "VENDA");
             bool hasPriceLine = snapshot.Active && snapshot.HasPriceLine;
+            bool hasLiveCandle = snapshot.Active && snapshot.HasLiveCandle;
 
-            if (!hasSignal && !hasPriceLine)
+            if (!hasSignal && !hasPriceLine && !hasLiveCandle)
             {
                 return;
             }
@@ -363,6 +418,35 @@ namespace ChartPulseOverlayAgent
                 {
                     g.DrawLine(shadowPen, lineX0, lineY + 1.5f, lineX1, lineY + 1.5f);
                     g.DrawLine(linePen, lineX0, lineY, lineX1, lineY);
+                }
+            }
+
+            if (hasLiveCandle)
+            {
+                double normLiveX = snapshot.HasLiveCandleBounds
+                    ? snapshot.LiveCandleBoundsX + snapshot.ChartRelativeLiveX * snapshot.LiveCandleBoundsW
+                    : snapshot.LiveCandleX;
+                double normLiveY = snapshot.HasLiveCandleBounds
+                    ? snapshot.LiveCandleBoundsY + snapshot.ChartRelativeLiveY * snapshot.LiveCandleBoundsH
+                    : snapshot.LiveCandleY;
+
+                float cx = (float)(Math.Max(0.02, Math.Min(0.98, normLiveX)) * ClientSize.Width);
+                float cy = (float)(Math.Max(0.02, Math.Min(0.98, normLiveY)) * ClientSize.Height);
+
+                Color markerColor = snapshot.LiveCandleDirection == "BULL"
+                    ? Color.FromArgb(255, 16, 185, 129)
+                    : (snapshot.LiveCandleDirection == "BEAR"
+                        ? Color.FromArgb(255, 244, 63, 94)
+                        : Color.FromArgb(255, 251, 191, 36));
+
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                using (SolidBrush outerDark = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
+                using (Pen ringPen = new Pen(markerColor, 2f))
+                using (SolidBrush coreBrush = new SolidBrush(markerColor))
+                {
+                    g.FillEllipse(outerDark, cx - 8f, cy - 8f, 16f, 16f);
+                    g.DrawEllipse(ringPen, cx - 7f, cy - 7f, 14f, 14f);
+                    g.FillEllipse(coreBrush, cx - 3f, cy - 3f, 6f, 6f);
                 }
             }
 
@@ -600,7 +684,7 @@ namespace ChartPulseOverlayAgent
                     res,
                     200,
                     string.Format(
-                        "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.1.0\",\"priceLineSupported\":true,\"active\":{0},\"autoStartEnabled\":{1}}}",
+                        "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.2.0\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"active\":{0},\"autoStartEnabled\":{1}}}",
                         active ? "true" : "false",
                         autoStart ? "true" : "false"
                     )
@@ -664,6 +748,57 @@ namespace ChartPulseOverlayAgent
                 }
 
                 _overlayForm.UpdatePriceLine(sessionId, true, priceY, relPriceY, hasBounds, bx, by, bw, bh);
+                WriteJson(res, 200, "{\"ok\":true}");
+                return;
+            }
+
+            if (req.HttpMethod == "POST" && path == "/overlay/candle")
+            {
+                string sessionId = ExtractJsonString(bodyText, "sessionId");
+                string candleObj = ExtractJsonObject(bodyText, "liveCandle");
+                if (string.IsNullOrEmpty(candleObj))
+                {
+                    _overlayForm.UpdateLiveCandle(sessionId, false, 0.5, 0.5, 0.5, 0.5, "NEUTRAL", false, 0, 0, 1, 1);
+                    WriteJson(res, 200, "{\"ok\":true}");
+                    return;
+                }
+
+                string boundsObj = ExtractJsonObject(candleObj, "chartBounds");
+                string candleShallow = string.IsNullOrEmpty(boundsObj)
+                    ? candleObj
+                    : candleObj.Replace(boundsObj, "{}");
+
+                double liveX = ExtractJsonDouble(candleShallow, "x", 0.5);
+                double liveY = ExtractJsonDouble(candleShallow, "y", 0.5);
+                double relLiveX = ExtractJsonDouble(candleShallow, "chartRelativeX", liveX);
+                double relLiveY = ExtractJsonDouble(candleShallow, "chartRelativeY", liveY);
+                string dir = ExtractJsonString(candleShallow, "direction");
+                bool hasBounds = false;
+                double bx = 0, by = 0, bw = 1, bh = 1;
+
+                if (!string.IsNullOrEmpty(boundsObj))
+                {
+                    bx = ExtractJsonDouble(boundsObj, "x", 0);
+                    by = ExtractJsonDouble(boundsObj, "y", 0);
+                    bw = ExtractJsonDouble(boundsObj, "width", 1);
+                    bh = ExtractJsonDouble(boundsObj, "height", 1);
+                    hasBounds = bw > 0.05 && bh > 0.05;
+                }
+
+                _overlayForm.UpdateLiveCandle(
+                    sessionId,
+                    true,
+                    liveX,
+                    liveY,
+                    relLiveX,
+                    relLiveY,
+                    dir,
+                    hasBounds,
+                    bx,
+                    by,
+                    bw,
+                    bh
+                );
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }

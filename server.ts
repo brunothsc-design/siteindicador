@@ -10,6 +10,7 @@ import {
 } from './server/analyzeFrameCore.ts';
 import type {
   AnalyzeFrameRequest,
+  LiveCandleTracker,
   OverlayState,
   PriceLine,
   VisualSignal,
@@ -27,6 +28,7 @@ const overlayState: OverlayState = {
   sessionId: null,
   signal: null,
   priceLine: null,
+  liveCandle: null,
   chartBounds: null,
   updatedAt: Date.now(),
 };
@@ -98,6 +100,7 @@ async function startServer(): Promise<void> {
     overlayState.sessionId = sessionId;
     overlayState.signal = null;
     overlayState.priceLine = null;
+    overlayState.liveCandle = null;
     overlayState.chartBounds = null;
     overlayState.updatedAt = Date.now();
     broadcastOverlayState();
@@ -124,6 +127,25 @@ async function startServer(): Promise<void> {
     res.json({ ok: true });
   });
 
+  app.post('/api/overlay/candle', (req: Request, res: Response) => {
+    const body = req.body as { sessionId?: string; liveCandle?: LiveCandleTracker | null };
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+    if (!sessionId || deactivatedSessions.has(sessionId) || overlayState.sessionId !== sessionId) {
+      res.json({ ok: true, ignored: true });
+      return;
+    }
+
+    const nextCandle = body?.liveCandle ?? null;
+    overlayState.liveCandle = nextCandle;
+    if (nextCandle?.chartBounds) {
+      overlayState.chartBounds = nextCandle.chartBounds;
+    }
+    overlayState.updatedAt = Date.now();
+    broadcastOverlayState();
+
+    res.json({ ok: true });
+  });
+
   app.post('/api/overlay/clear', (req: Request, res: Response) => {
     const body = req.body as { sessionId?: string };
     if (typeof body?.sessionId === 'string' && body.sessionId) {
@@ -141,6 +163,7 @@ async function startServer(): Promise<void> {
     overlayState.sessionId = null;
     overlayState.signal = null;
     overlayState.priceLine = null;
+    overlayState.liveCandle = null;
     overlayState.chartBounds = null;
     overlayState.updatedAt = Date.now();
     broadcastOverlayState();

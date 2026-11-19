@@ -5,6 +5,7 @@ export default async function handler(): Promise<Response> {
       sessionId: null,
       signal: null,
       priceLine: null,
+      liveCandle: null,
       chartBounds: null,
       updatedAt: Date.now(),
     }),

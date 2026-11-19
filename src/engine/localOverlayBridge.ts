@@ -1,4 +1,4 @@
-import type { PriceLine, VisualSignal } from '../types/signals.ts';
+import type { LiveCandleTracker, PriceLine, VisualSignal } from '../types/signals.ts';
 
 export const LOCAL_OVERLAY_URL = 'http://127.0.0.1:47821';
 
@@ -136,6 +136,25 @@ export async function pushLocalOverlayPrice(
       body: JSON.stringify({
         sessionId,
         priceLine,
+      }),
+    },
+    1000
+  );
+  return Boolean(res && res.ok);
+}
+
+export async function pushLocalOverlayCandle(
+  sessionId: string,
+  liveCandle: LiveCandleTracker | null
+): Promise<boolean> {
+  const res = await fetchLocalOverlay(
+    '/overlay/candle',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        liveCandle,
       }),
     },
     1000

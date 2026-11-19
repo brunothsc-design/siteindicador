@@ -48,13 +48,18 @@ function createWindows() {
 <head><meta charset="utf-8"><style>
 html, body { margin:0; padding:0; width:100vw; height:100vh; overflow:hidden; background:transparent; pointer-events:none; user-select:none; }
 #line { position:fixed; height:2px; background:#38BDF8; box-shadow:0 0 4px #000,0 1px 1px #000; transform:translateY(-50%); display:none; }
+#live { position:fixed; width:16px; height:16px; border-radius:9999px; border:2px solid #FBBF24; background:rgba(11,14,17,0.45); box-shadow:0 0 6px #000; transform:translate(-50%,-50%); display:none; align-items:center; justify-content:center; }
+#liveDot { width:6px; height:6px; border-radius:9999px; background:#FBBF24; }
 #sig { position:fixed; transform:translate(-50%,-50%); font:700 16px/1 Consolas,monospace; letter-spacing:0.06em; text-shadow:0 1px 2px #000,0 0 8px #000; display:none; }
 </style></head>
 <body>
 <div id="line"></div>
+<div id="live"><div id="liveDot"></div></div>
 <div id="sig"></div>
 <script>
 const lineEl = document.getElementById('line');
+const liveEl = document.getElementById('live');
+const liveDotEl = document.getElementById('liveDot');
 const el = document.getElementById('sig');
 const es = new EventSource('${APP_URL}/api/overlay/stream');
 es.onmessage = (ev) => {
@@ -62,6 +67,7 @@ es.onmessage = (ev) => {
     const s = JSON.parse(ev.data);
     if (!s.active) {
       lineEl.style.display = 'none';
+      liveEl.style.display = 'none';
       el.style.display = 'none';
       return;
     }
@@ -75,6 +81,19 @@ es.onmessage = (ev) => {
     } else {
       lineEl.style.display = 'none';
     }
+    if (s.liveCandle) {
+      const cb = s.liveCandle.chartBounds || s.chartBounds;
+      const cx = cb ? cb.x + s.liveCandle.chartRelativeX * cb.width : s.liveCandle.x;
+      const cy = cb ? cb.y + s.liveCandle.chartRelativeY * cb.height : s.liveCandle.y;
+      const cColor = s.liveCandle.direction === 'BULL' ? '#10B981' : (s.liveCandle.direction === 'BEAR' ? '#F43F5E' : '#FBBF24');
+      liveEl.style.left = (cx * 100) + '%';
+      liveEl.style.top = (cy * 100) + '%';
+      liveEl.style.borderColor = cColor;
+      liveDotEl.style.background = cColor;
+      liveEl.style.display = 'flex';
+    } else {
+      liveEl.style.display = 'none';
+    }
     if (!s.signal || (s.signal.direction !== 'COMPRA' && s.signal.direction !== 'VENDA')) {
       el.style.display = 'none';
       return;
@@ -86,10 +105,11 @@ es.onmessage = (ev) => {
     el.style.display = 'block';
   } catch {
     lineEl.style.display = 'none';
+    liveEl.style.display = 'none';
     el.style.display = 'none';
   }
 };
-es.onerror = () => { lineEl.style.display = 'none'; el.style.display = 'none'; };
+es.onerror = () => { lineEl.style.display = 'none'; liveEl.style.display = 'none'; el.style.display = 'none'; };
 </script>
 </body>
 </html>`;

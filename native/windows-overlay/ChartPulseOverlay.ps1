@@ -94,10 +94,11 @@ $form.Add_Paint({
     }
 
     $hasPriceLine = $null -ne $state.priceLine
+    $hasLiveCandle = $null -ne $state.liveCandle
     $dir = if ($null -ne $state.signal) { [string]$state.signal.direction } else { "" }
     $hasSignal = ($dir -eq "COMPRA" -or $dir -eq "VENDA")
 
-    if (-not $hasPriceLine -and -not $hasSignal) {
+    if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasSignal) {
         return
     }
 
@@ -123,6 +124,39 @@ $form.Add_Paint({
         $g.DrawLine($linePen, $lineX0, $lineY, $lineX1, $lineY)
         $shadowPen.Dispose()
         $linePen.Dispose()
+    }
+
+    if ($hasLiveCandle) {
+        $cBounds = if ($null -ne $state.liveCandle.chartBounds) { $state.liveCandle.chartBounds } else { $state.chartBounds }
+        if ($null -ne $cBounds -and $null -ne $state.liveCandle.chartRelativeX -and $null -ne $state.liveCandle.chartRelativeY) {
+            $normLiveX = $cBounds.x + ($state.liveCandle.chartRelativeX * $cBounds.width)
+            $normLiveY = $cBounds.y + ($state.liveCandle.chartRelativeY * $cBounds.height)
+        } else {
+            $normLiveX = $state.liveCandle.x
+            $normLiveY = $state.liveCandle.y
+        }
+
+        $cx = [float]([Math]::Max(0.02, [Math]::Min(0.98, $normLiveX)) * $form.ClientSize.Width)
+        $cy = [float]([Math]::Max(0.02, [Math]::Min(0.98, $normLiveY)) * $form.ClientSize.Height)
+        $cDir = [string]$state.liveCandle.direction
+        $cColor = if ($cDir -eq "BULL") {
+            [System.Drawing.Color]::FromArgb(255, 16, 185, 129)
+        } elseif ($cDir -eq "BEAR") {
+            [System.Drawing.Color]::FromArgb(255, 244, 63, 94)
+        } else {
+            [System.Drawing.Color]::FromArgb(255, 251, 191, 36)
+        }
+
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
+        $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 11, 14, 17))
+        $ringPen = New-Object System.Drawing.Pen($cColor, 2)
+        $dotBrush = New-Object System.Drawing.SolidBrush($cColor)
+        $g.FillEllipse($bgBrush, $cx - 8, $cy - 8, 16, 16)
+        $g.DrawEllipse($ringPen, $cx - 7, $cy - 7, 14, 14)
+        $g.FillEllipse($dotBrush, $cx - 3, $cy - 3, 6, 6)
+        $bgBrush.Dispose()
+        $ringPen.Dispose()
+        $dotBrush.Dispose()
     }
 
     if ($hasSignal) {
