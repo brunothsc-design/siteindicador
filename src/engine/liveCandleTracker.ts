@@ -262,7 +262,7 @@ export function detectLiveMovingCandle(
   const candleClusters = clusters.filter((c) => {
     const spanPx = c[c.length - 1].px - c[0].px + 1;
     const totalPixels = c.reduce((acc, col) => acc + col.activeRows.length, 0);
-    if (spanPx > maxCandleSpan || totalPixels < 3) return false;
+    if (spanPx > maxCandleSpan || totalPixels < 2) return false;
 
     let minTop = height;
     let maxTop = -1;
@@ -270,7 +270,11 @@ export function detectLiveMovingCandle(
     let maxBot = -1;
     let fillSum = 0;
     let heightSum = 0;
+    let clusterBull = 0;
+    let clusterBear = 0;
     for (const col of c) {
+      clusterBull += col.bull;
+      clusterBear += col.bear;
       if (col.minPy < minTop) minTop = col.minPy;
       if (col.minPy > maxTop) maxTop = col.minPy;
       if (col.maxPy < minBot) minBot = col.maxPy;
@@ -280,9 +284,15 @@ export function detectLiveMovingCandle(
       fillSum += col.activeRows.length / Math.max(1, h);
     }
     const avgHeight = heightSum / c.length;
+    const clusterVertSpan = maxBot - minTop + 1;
 
     // Exclude thin horizontal line streaks
     if (spanPx >= 18 && avgHeight <= 2.2) {
+      return false;
+    }
+
+    // Exclude full-height 1-2px monochrome vertical divider/expiration lines (IQ Option, Quotex, TradingView)
+    if (spanPx <= 2 && clusterBull === 0 && clusterBear === 0 && clusterVertSpan >= plotH * 0.75) {
       return false;
     }
 
@@ -346,14 +356,14 @@ export function detectLiveMovingCandle(
   let closePy: number | null = null;
   let confidence = 0;
 
-  if (bullTotal >= 3 && bullTotal >= bearTotal * 1.3) {
+  if (bullTotal >= 2 && bullTotal >= bearTotal * 1.3) {
     direction = 'BULL';
     closePy = bodyTop;
-    confidence = 0.8;
-  } else if (bearTotal >= 3 && bearTotal >= bullTotal * 1.3) {
+    confidence = bullTotal >= 3 ? 0.8 : 0.74;
+  } else if (bearTotal >= 2 && bearTotal >= bullTotal * 1.3) {
     direction = 'BEAR';
     closePy = bodyBottom;
-    confidence = 0.8;
+    confidence = bearTotal >= 3 ? 0.8 : 0.74;
   } else if (monoTotal >= 4 && bodyBottom - bodyTop <= 4) {
     closePy = Math.round((bodyTop + bodyBottom) / 2);
     confidence = 0.72;
@@ -404,4 +414,31 @@ export function detectLiveMovingCandle(
     confidence: Number(Math.min(0.98, confidence).toFixed(2)),
     updatedAt: Date.now(),
   };
+}
+
+export type CandleDetectionFailureReason =
+  | 'chart_not_detected'
+  | 'invalid_chart_bounds'
+  | 'no_candle_columns_detected'
+  | 'ambiguous_candle_or_filtered';
+
+export function detectLiveMovingCandleWithReason(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  chartBounds: ChartBounds | null,
+  verifiedPriceLine: PriceLine | null,
+  chartDetected = true
+): { candle: LiveCandleTracker | null; reason: CandleDetectionFailureReason | null } {
+  if (!chartDetected) {
+    return { candle: null, reason: 'chart_not_detected' };
+  }
+  if (!chartBounds || width < 40 || height < 30) {
+    return { candle: null, reason: 'invalid_chart_bounds' };
+  }
+  const candle = detectLiveMovingCandle(rgba, width, height, chartBounds, verifiedPriceLine);
+  if (candle) {
+    return { candle, reason: null };
+  }
+  return { candle: null, reason: 'ambiguous_candle_or_filtered' };
 }

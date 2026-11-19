@@ -16,6 +16,8 @@ export interface LocalOverlayHealthResponse {
   priceLineSupported?: boolean;
   liveCandleSupported?: boolean;
   operationalStatusSupported?: boolean;
+  hasStatusAnchor?: boolean;
+  operationalStatus?: string;
   active?: boolean;
   autoStartEnabled?: boolean;
   targetBounds?: string;

@@ -8,7 +8,10 @@ import {
   type CandleBar,
 } from '../src/engine/candleAnalysis.ts';
 import { processFrameLocally } from '../src/engine/localScreenProcessor.ts';
-import { detectLiveMovingCandle } from '../src/engine/liveCandleTracker.ts';
+import {
+  detectLiveMovingCandle,
+  detectLiveMovingCandleWithReason,
+} from '../src/engine/liveCandleTracker.ts';
 import {
   checkDisplayCaptureEnvironment,
   classifyDisplayCaptureError,
@@ -1573,10 +1576,82 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     );
     assert.match(cs, /\\"version\\":\\"1\.3\.0\\"/);
     assert.match(cs, /operationalStatusSupported/);
+    assert.match(cs, /hasStatusAnchor/);
     assert.match(cs, /"\/overlay\/status"/);
     assert.match(cs, /HasStatusAnchor/);
     assert.match(cs, /_smoothStatusNormX/);
     assert.match(cs, /AGUARDANDO/);
+    // Opaque status background avoids TransparencyKey Magenta bleed on WinForms layered windows
+    assert.match(cs, /statusBg = new SolidBrush\(Color\.FromArgb\(255, 11, 14, 17\)\)/);
+  });
+
+  it('ignores vertical expiration/axis lines right of M1 candles, detects 2px forming candles without priceLine, and logs explicit reason when no candle exists', () => {
+    const width = 640;
+    const height = 360;
+    const bg: [number, number, number] = [19, 23, 34];
+    const bull: [number, number, number] = [34, 197, 94];
+    const bear: [number, number, number] = [239, 68, 68];
+
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+        for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+          const idx = (y * width + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+
+    // Previous M1 candles + newly opened 2px tall forming green M1 candle at x=392..395 without priceLine
+    for (let i = 0; i < 12; i++) {
+      const x0 = 120 + i * 22;
+      const c = i % 2 === 0 ? bear : bull;
+      paint(x0 + 3, 120 + i * 3, x0 + 3, 210 + i * 2, c);
+      paint(x0, 140 + i * 3, x0 + 6, 185 + i * 2, c);
+    }
+    // Newly opened 2px M1 candle (bullTotal = 2 per column, no horizontal price line)
+    const newCandleX0 = 392;
+    paint(newCandleX0, 162, newCandleX0 + 3, 163, bull);
+
+    // Full-height 1px vertical expiration line (IQ Option / Quotex style) to the right inside chartBounds
+    const expLineX = 416;
+    paint(expLineX, 40, expLineX, 310, [215, 222, 235]);
+
+    const digest = processFrameLocally(rgba, width, height, null);
+    assert.equal(digest.chartDetected, true);
+
+    const detected = detectLiveMovingCandleWithReason(
+      rgba,
+      width,
+      height,
+      digest.chartBounds,
+      null,
+      digest.chartDetected
+    );
+    assert.equal(detected.reason, null);
+    assert.ok(detected.candle !== null, 'Must lock onto newly opened 2px M1 candle instead of vertical expiration line');
+    assert.ok(
+      Math.abs(detected.candle.x - (newCandleX0 + 1.5) / width) <= 0.015,
+      `Expected forming candle near ${newCandleX0}, got x=${detected.candle.x}`
+    );
+
+    const anchor = computeCandleStatusAnchor(detected.candle, digest.chartBounds);
+    assert.ok(anchor !== null);
+    assert.ok(anchor.y < detected.candle.topY, 'AGUARDANDO anchor must sit strictly above the 2px forming candle');
+
+    // Non-chart frame must report explicit reason and produce null anchor (never invent position)
+    const missingChart = detectLiveMovingCandleWithReason(rgba, width, height, null, null, false);
+    assert.equal(missingChart.candle, null);
+    assert.equal(missingChart.reason, 'chart_not_detected');
+    assert.equal(computeCandleStatusAnchor(missingChart.candle, null), null);
   });
 });
 

@@ -207,13 +207,15 @@ namespace ChartPulseOverlayAgent
         {
             if (!IsHandleCreated) return;
             int exStyle = Win32Native.GetWindowLong(Handle, Win32Native.GWL_EXSTYLE);
-            int nextStyle = exStyle
-                | Win32Native.WS_EX_LAYERED
+            int requiredStyle = Win32Native.WS_EX_LAYERED
                 | Win32Native.WS_EX_TRANSPARENT
                 | Win32Native.WS_EX_TOPMOST
                 | Win32Native.WS_EX_TOOLWINDOW
                 | Win32Native.WS_EX_NOACTIVATE;
-            Win32Native.SetWindowLong(Handle, Win32Native.GWL_EXSTYLE, nextStyle);
+            if ((exStyle & requiredStyle) != requiredStyle)
+            {
+                Win32Native.SetWindowLong(Handle, Win32Native.GWL_EXSTYLE, exStyle | requiredStyle);
+            }
             Win32Native.SetWindowPos(
                 Handle,
                 Win32Native.HWND_TOPMOST,
@@ -372,6 +374,11 @@ namespace ChartPulseOverlayAgent
                 }
                 _state.Active = true;
                 _state.OperationalStatus = safeStatus;
+                if (safeStatus == "AGUARDANDO")
+                {
+                    _state.Direction = string.Empty;
+                    _state.ExpiresAtMs = 0;
+                }
                 if (hasStatusBounds)
                 {
                     _state.HasStatusBounds = true;
@@ -457,10 +464,12 @@ namespace ChartPulseOverlayAgent
             bool active;
             string surface;
             string opStatus;
+            bool hasStatusAnchor;
             lock (_stateLock)
             {
                 active = _state.Active;
                 surface = _state.DisplaySurface;
+                hasStatusAnchor = _state.HasStatusAnchor;
                 opStatus = string.IsNullOrEmpty(_state.OperationalStatus)
                     ? (active ? "AGUARDANDO" : "NONE")
                     : _state.OperationalStatus;
@@ -468,7 +477,7 @@ namespace ChartPulseOverlayAgent
             Rectangle b = _lastTargetBounds;
             string boundsText = string.Format("{0},{1},{2}x{3}", b.X, b.Y, b.Width, b.Height);
             return string.Format(
-                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.0\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9}}}",
+                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.0\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"hasStatusAnchor\":{10},\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9}}}",
                 active ? "true" : "false",
                 autoStart ? "true" : "false",
                 surface,
@@ -478,7 +487,8 @@ namespace ChartPulseOverlayAgent
                 Interlocked.Read(ref _liveCandleUpdates),
                 Interlocked.Read(ref _statusUpdates),
                 Interlocked.Read(ref _signalUpdates),
-                Interlocked.Read(ref _paintCount)
+                Interlocked.Read(ref _paintCount),
+                hasStatusAnchor ? "true" : "false"
             );
         }
 
@@ -677,7 +687,7 @@ namespace ChartPulseOverlayAgent
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
                 using (Font statusFont = new Font("Consolas", 11f, FontStyle.Bold))
-                using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(245, 11, 14, 17)))
+                using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
                 using (Pen statusBorder = new Pen(statusColor, 1f))
                 using (SolidBrush statusBrush = new SolidBrush(statusColor))
                 {
@@ -1284,7 +1294,7 @@ namespace ChartPulseOverlayAgent
 
         private static double ExtractJsonDouble(string json, string key, double fallback)
         {
-            Match m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+            Match m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)");
             double val;
             if (m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out val))
             {

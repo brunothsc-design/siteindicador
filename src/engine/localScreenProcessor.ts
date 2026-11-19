@@ -253,7 +253,51 @@ export function processFrameLocally(
   const padY = 0.05;
   const left = Math.max(0, minGx / GRID_W - padXLeft);
   const top = Math.max(0, minGy / GRID_H - padY);
-  const right = Math.min(1, (maxGx + 1) / GRID_W + padXRight);
+  let rightCandleNormX = (maxGx + 1) / GRID_W;
+
+  // Fine pixel-level rightward check so newly opened 2px forming M1 candles between GRID_H rows are not clipped out of chartBounds
+  if (chartDetected) {
+    const scanStartX = Math.max(0, Math.floor(rightCandleNormX * width));
+    const scanEndX = Math.min(width - 3, Math.ceil((rightCandleNormX + 0.065) * width));
+    const scanTopY = Math.max(2, Math.floor(top * height));
+    const scanBotY = Math.min(height - 3, Math.ceil((Math.min(1, (maxGy + 1) / GRID_H + padY)) * height));
+    const maxBtnSpan = Math.max(24, Math.round(width * 0.04));
+
+    for (let px = scanStartX; px <= scanEndX; px++) {
+      let colColoredHits = 0;
+      let hitMinPy = height;
+      let hitMaxPy = -1;
+      for (let py = scanTopY; py <= scanBotY; py++) {
+        const idx = (py * width + px) * 4;
+        const k = classifyCandlePixel(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg);
+        if (k === 'BULL' || k === 'BEAR') {
+          colColoredHits++;
+          if (py < hitMinPy) hitMinPy = py;
+          if (py > hitMaxPy) hitMaxPy = py;
+        }
+      }
+      if (colColoredHits >= 2) {
+        // Verify it is not a wide solid UI button/panel on the right
+        const midPy = Math.round((hitMinPy + hitMaxPy) / 2);
+        let hSpan = 1;
+        for (let lx = px - 1; lx >= Math.max(0, px - maxBtnSpan); lx--) {
+          const lIdx = (midPy * width + lx) * 4;
+          if (classifyCandlePixel(rgba[lIdx], rgba[lIdx + 1], rgba[lIdx + 2], bg) !== null) hSpan++;
+          else break;
+        }
+        for (let rx = px + 1; rx <= Math.min(width - 1, px + maxBtnSpan); rx++) {
+          const rIdx = (midPy * width + rx) * 4;
+          if (classifyCandlePixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg) !== null) hSpan++;
+          else break;
+        }
+        if (hSpan < maxBtnSpan) {
+          rightCandleNormX = Math.max(rightCandleNormX, (px + 1) / width);
+        }
+      }
+    }
+  }
+
+  const right = Math.min(1, rightCandleNormX + padXRight);
   const bottom = Math.min(1, (maxGy + 1) / GRID_H + padY);
 
   const chartBounds: ChartBounds | null = chartDetected

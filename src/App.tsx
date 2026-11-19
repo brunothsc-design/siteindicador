@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalOverlay, type VideoDisplayRect } from './components/SignalOverlay.tsx';
 import { isSignalConfidenceValid } from './config/signalConfig.ts';
-import { detectLiveMovingCandle } from './engine/liveCandleTracker.ts';
+import {
+  detectLiveMovingCandleWithReason,
+  type CandleDetectionFailureReason,
+} from './engine/liveCandleTracker.ts';
 import { processFrameLocally } from './engine/localScreenProcessor.ts';
 import {
   checkLocalOverlayHealth,
@@ -97,6 +100,8 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [videoRect, setVideoRect] = useState<VideoDisplayRect | null>(null);
   const [overlayStatus, setOverlayStatus] = useState<OverlayConnectionState>('checking');
+  const [overlayAgentOutdated, setOverlayAgentOutdated] = useState(false);
+  const [overlayAgentVersion, setOverlayAgentVersion] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -252,6 +257,22 @@ export default function App() {
       const changed = operationalStatusChanged(lastOperationalStatusRef.current, nextStatus);
       const heartbeatDue = now - lastStatusPushAtRef.current >= 1500;
 
+      // Refresh hold timestamp whenever live candle anchor is actively confirmed so transient hold window stays accurate
+      if (
+        !changed &&
+        latestCandle !== null &&
+        lastOperationalStatusRef.current?.anchor &&
+        nextStatus.anchor
+      ) {
+        lastOperationalStatusRef.current = {
+          ...lastOperationalStatusRef.current,
+          anchor: {
+            ...lastOperationalStatusRef.current.anchor,
+            updatedAt: now,
+          },
+        };
+      }
+
       if (forcePush || changed || heartbeatDue) {
         lastOperationalStatusRef.current = nextStatus;
         lastStatusPushAtRef.current = now;
@@ -334,9 +355,16 @@ export default function App() {
     }
 
     // Separate forming-candle tracking indicator (independent from priceLine and COMPRA/VENDA signals)
-    const nextCandle = local.chartDetected
-      ? detectLiveMovingCandle(imgData.data, targetW, targetH, local.chartBounds, nextPrice)
-      : null;
+    const candleDetect = detectLiveMovingCandleWithReason(
+      imgData.data,
+      targetW,
+      targetH,
+      local.chartBounds,
+      nextPrice,
+      local.chartDetected
+    );
+    const nextCandle = candleDetect.candle;
+    const candleFailureReason: CandleDetectionFailureReason | null = candleDetect.reason;
     const candleChanged = liveCandleChanged(lastLiveCandleRef.current, nextCandle);
     const candleHeartbeatDue = nextCandle !== null && now - lastLiveCandlePushAtRef.current >= 1500;
 
@@ -372,15 +400,23 @@ export default function App() {
       local.chartDetected
     );
 
-    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}`;
+    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}|${candleFailureReason ?? 'ok'}`;
     if (diagKey !== lastDiagStateRef.current) {
       lastDiagStateRef.current = diagKey;
+      if (!lastOperationalStatusRef.current?.anchor && candleFailureReason) {
+        console.warn('[ChartPulse:Diag] AGUARDANDO oculto — vela M1 não identificada', {
+          reason: candleFailureReason,
+          chartDetected: local.chartDetected,
+          chartBounds: local.chartBounds,
+        });
+      }
       console.info('[ChartPulse:Diag]', {
         frame: `${targetW}x${targetH}`,
         chartDetected: local.chartDetected,
         chartBounds: local.chartBounds,
         operationalStatus: lastOperationalStatusRef.current?.status ?? null,
         statusAnchor: lastOperationalStatusRef.current?.anchor ?? null,
+        candleFailureReason,
         priceLine: nextPrice
           ? { y: nextPrice.y, source: nextPrice.source, conf: nextPrice.confidence }
           : null,
@@ -745,17 +781,29 @@ export default function App() {
       const health = await checkLocalOverlayHealth();
       const ok = Boolean(health?.ok);
       localAgentReadyRef.current = ok;
+      const supportsStatus = Boolean(health?.operationalStatusSupported);
       if (!cancelled) {
         setOverlayStatus(ok ? 'connected' : 'disconnected');
+        setOverlayAgentOutdated(ok && !supportsStatus);
+        setOverlayAgentVersion(health?.version ?? null);
       }
       if (ok && health) {
+        if (!supportsStatus) {
+          console.warn(
+            `[ChartPulse:Diag] Agente Windows instalado (${health.version ?? 'desconhecida'}) não suporta /overlay/status (AGUARDANDO). Recompile e reinstale ChartPulseOverlaySetup.exe v1.3.0+.`
+          );
+        }
         console.info('[ChartPulse:Diag] Agente Windows', {
           version: health.version,
           priceLineSupported: health.priceLineSupported,
           liveCandleSupported: health.liveCandleSupported,
+          operationalStatusSupported: health.operationalStatusSupported,
+          hasStatusAnchor: health.hasStatusAnchor,
+          operationalStatus: health.operationalStatus,
           targetBounds: health.targetBounds,
           priceLineUpdates: health.priceLineUpdates,
           liveCandleUpdates: health.liveCandleUpdates,
+          statusUpdates: health.statusUpdates,
           paintCount: health.paintCount,
         });
       }
@@ -790,6 +838,10 @@ export default function App() {
             muted
             playsInline
             onLoadedMetadata={syncVideoRect}
+            onLoadedData={() => {
+              syncVideoRect();
+              trackCurrentPrice();
+            }}
             onResize={syncVideoRect}
             className="h-full w-full object-contain pointer-events-none select-none"
           />
@@ -842,9 +894,15 @@ export default function App() {
 
           <p className="text-xs max-w-md leading-relaxed text-slate-400">
             {overlayStatus === 'connected' ? (
-              <span className="text-emerald-400">
-                Overlay Windows: conectado em segundo plano
-              </span>
+              overlayAgentOutdated ? (
+                <span className="text-amber-400">
+                  Overlay Windows desatualizado ({overlayAgentVersion ?? 'v1.2.0'}) — recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.0+) para exibir AGUARDANDO acima da vela na corretora.
+                </span>
+              ) : (
+                <span className="text-emerald-400">
+                  Overlay Windows: conectado em segundo plano ({overlayAgentVersion ?? 'v1.3.0'})
+                </span>
+              )
             ) : overlayStatus === 'checking' ? (
               'Overlay Windows: verificando conexão local...'
             ) : (
