@@ -117,8 +117,7 @@ export function detectLiveMovingCandle(
   }
 
   const bg = estimateChartBackground(rgba, width, height, chartBounds);
-  const colStep = plotW > 640 ? 2 : 1;
-  const maxCandleSpan = Math.max(22, Math.round(plotW * 0.055));
+  const maxCandleSpan = Math.max(28, Math.round(plotW * 0.075));
 
   interface ColStats {
     px: number;
@@ -131,8 +130,9 @@ export function detectLiveMovingCandle(
   }
 
   const validCols: ColStats[] = [];
+  const tinyColoredCols: ColStats[] = [];
 
-  for (let px = bx0 + 3; px <= bx1 - 3; px += colStep) {
+  for (let px = bx0 + 2; px <= bx1 - 2; px++) {
     let run = 0;
     let runStartPy = -1;
     let bestRun = 0;
@@ -143,19 +143,46 @@ export function detectLiveMovingCandle(
     let maxPy = -1;
     const activeRows: number[] = [];
 
+    let tinyRun = 0;
+    let tinyBull = 0;
+    let tinyBear = 0;
+    let tinyMinPy = height;
+    let tinyMaxPy = -1;
+    const tinyRows: number[] = [];
+
     const commitRun = (startPy: number, endPy: number) => {
       const len = endPy - startPy + 1;
+      if (len < 2) return;
+
+      let segBull = 0;
+      let segBear = 0;
+      let segMono = 0;
+      for (let r = startPy; r <= endPy; r++) {
+        const rIdx = (r * width + px) * 4;
+        const kind = classifyPixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg);
+        if (kind === 'BULL') segBull++;
+        else if (kind === 'BEAR') segBear++;
+        else if (kind === 'MONO') segMono++;
+      }
+
       if (len >= 3) {
         if (len > bestRun) bestRun = len;
         if (startPy < minPy) minPy = startPy;
         if (endPy > maxPy) maxPy = endPy;
+        bull += segBull;
+        bear += segBear;
+        mono += segMono;
         for (let r = startPy; r <= endPy; r++) {
-          const rIdx = (r * width + px) * 4;
-          const kind = classifyPixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg);
-          if (kind === 'BULL') bull++;
-          else if (kind === 'BEAR') bear++;
-          else if (kind === 'MONO') mono++;
           activeRows.push(r);
+        }
+      } else if (len === 2 && (segBull >= 2 || segBear >= 2)) {
+        tinyRun = Math.max(tinyRun, 2);
+        tinyBull += segBull;
+        tinyBear += segBear;
+        if (startPy < tinyMinPy) tinyMinPy = startPy;
+        if (endPy > tinyMaxPy) tinyMaxPy = endPy;
+        for (let r = startPy; r <= endPy; r++) {
+          tinyRows.push(r);
         }
       }
     };
@@ -177,7 +204,43 @@ export function detectLiveMovingCandle(
 
     if (bestRun >= 3 && activeRows.length >= 3) {
       validCols.push({ px, minPy, maxPy, bull, bear, mono, activeRows });
+    } else if (tinyRun === 2 && tinyRows.length >= 2) {
+      tinyColoredCols.push({
+        px,
+        minPy: tinyMinPy,
+        maxPy: tinyMaxPy,
+        bull: tinyBull,
+        bear: tinyBear,
+        mono: 0,
+        activeRows: tinyRows,
+      });
     }
+  }
+
+  if (tinyColoredCols.length > 0) {
+    let tCluster: ColStats[] = [tinyColoredCols[0]];
+    const flushTiny = () => {
+      const span = tCluster[tCluster.length - 1].px - tCluster[0].px + 1;
+      if (tCluster.length >= 2 && span <= 16) {
+        const lastValidPx = validCols.length > 0 ? validCols[validCols.length - 1].px : -1;
+        if (tCluster[0].px > lastValidPx) {
+          validCols.push(...tCluster);
+        }
+      }
+    };
+    for (let i = 1; i < tinyColoredCols.length; i++) {
+      if (
+        tinyColoredCols[i].px - tinyColoredCols[i - 1].px <= 2 &&
+        Math.abs(tinyColoredCols[i].minPy - tinyColoredCols[i - 1].minPy) <= 1
+      ) {
+        tCluster.push(tinyColoredCols[i]);
+      } else {
+        flushTiny();
+        tCluster = [tinyColoredCols[i]];
+      }
+    }
+    flushTiny();
+    validCols.sort((a, b) => a.px - b.px);
   }
 
   if (validCols.length === 0) {
@@ -187,7 +250,7 @@ export function detectLiveMovingCandle(
   const clusters: ColStats[][] = [];
   let current: ColStats[] = [validCols[0]];
   for (let i = 1; i < validCols.length; i++) {
-    if (validCols[i].px - validCols[i - 1].px <= colStep * 2 + 1) {
+    if (validCols[i].px - validCols[i - 1].px <= 3) {
       current.push(validCols[i]);
     } else {
       clusters.push(current);
@@ -197,24 +260,41 @@ export function detectLiveMovingCandle(
   clusters.push(current);
 
   const candleClusters = clusters.filter((c) => {
-    const spanPx = c[c.length - 1].px - c[0].px + colStep;
+    const spanPx = c[c.length - 1].px - c[0].px + 1;
     const totalPixels = c.reduce((acc, col) => acc + col.activeRows.length, 0);
-    if (spanPx > maxCandleSpan || totalPixels < 4) return false;
+    if (spanPx > maxCandleSpan || totalPixels < 3) return false;
 
-    // Exclude solid rectangular right-axis price pills or wide UI badges
-    if (spanPx >= 10 && c.length >= 4) {
-      let minTop = height;
-      let maxTop = -1;
-      let minBot = height;
-      let maxBot = -1;
-      let fillSum = 0;
-      for (const col of c) {
-        if (col.minPy < minTop) minTop = col.minPy;
-        if (col.minPy > maxTop) maxTop = col.minPy;
-        if (col.maxPy < minBot) minBot = col.maxPy;
-        if (col.maxPy > maxBot) maxBot = col.maxPy;
-        fillSum += col.activeRows.length / Math.max(1, col.maxPy - col.minPy + 1);
-      }
+    let minTop = height;
+    let maxTop = -1;
+    let minBot = height;
+    let maxBot = -1;
+    let fillSum = 0;
+    let heightSum = 0;
+    for (const col of c) {
+      if (col.minPy < minTop) minTop = col.minPy;
+      if (col.minPy > maxTop) maxTop = col.minPy;
+      if (col.maxPy < minBot) minBot = col.maxPy;
+      if (col.maxPy > maxBot) maxBot = col.maxPy;
+      const h = col.maxPy - col.minPy + 1;
+      heightSum += h;
+      fillSum += col.activeRows.length / Math.max(1, h);
+    }
+    const avgHeight = heightSum / c.length;
+
+    // Exclude thin horizontal line streaks
+    if (spanPx >= 18 && avgHeight <= 2.2) {
+      return false;
+    }
+
+    // Exclude horizontal or boundary-clipped right-axis price pills while keeping genuine interior wickless M1 candles and newly opened 2-4px candles
+    const touchesRightBoundary = c[c.length - 1].px >= bx1 - 6;
+    if (
+      spanPx >= 8 &&
+      c.length >= 4 &&
+      avgHeight >= 5 &&
+      avgHeight <= 24 &&
+      (spanPx >= avgHeight * 1.1 || touchesRightBoundary)
+    ) {
       const flatTopBottom = maxTop - minTop <= 1 && maxBot - minBot <= 1;
       const solidFill = fillSum / c.length >= 0.88;
       if (flatTopBottom && solidFill) {
@@ -266,15 +346,15 @@ export function detectLiveMovingCandle(
   let closePy: number | null = null;
   let confidence = 0;
 
-  if (bullTotal >= 4 && bullTotal > bearTotal * 1.4) {
+  if (bullTotal >= 3 && bullTotal >= bearTotal * 1.3) {
     direction = 'BULL';
     closePy = bodyTop;
     confidence = 0.8;
-  } else if (bearTotal >= 4 && bearTotal > bullTotal * 1.4) {
+  } else if (bearTotal >= 3 && bearTotal >= bullTotal * 1.3) {
     direction = 'BEAR';
     closePy = bodyBottom;
     confidence = 0.8;
-  } else if (monoTotal >= 5 && bodyBottom - bodyTop <= 4) {
+  } else if (monoTotal >= 4 && bodyBottom - bodyTop <= 4) {
     closePy = Math.round((bodyTop + bodyBottom) / 2);
     confidence = 0.72;
   }
@@ -283,11 +363,11 @@ export function detectLiveMovingCandle(
   let resolvedNormY: number | null = null;
   if (
     verifiedPriceLine &&
-    verifiedPriceLine.source === 'PRICE_LINE' &&
-    verifiedPriceLine.confidence >= 0.72
+    (verifiedPriceLine.source === 'PRICE_LINE' || verifiedPriceLine.source === 'CANDLE_CLOSE') &&
+    verifiedPriceLine.confidence >= 0.64
   ) {
     const linePy = verifiedPriceLine.y * height;
-    if (linePy >= topPy - 18 && linePy <= bottomPy + 18) {
+    if (linePy >= topPy - 24 && linePy <= bottomPy + 24) {
       resolvedNormY = verifiedPriceLine.y;
       confidence = Math.max(confidence, verifiedPriceLine.confidence);
     }

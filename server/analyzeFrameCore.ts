@@ -233,18 +233,18 @@ export async function executeGeminiFrameAnalysis(
     ? `Último sinal emitido: ${request.lastSignal.direction} na posição X=${request.lastSignal.candleX.toFixed(2)} (id=${request.lastSignal.candleId}). NÃO repita sinal na mesma vela nem inverta bruscamente sem clara reversão confirmada.`
     : 'Nenhum sinal recente ativo.';
 
-  const promptText = `Você é o motor visual universal de altíssima precisão do ChartPulse AI. Analise esta captura de tela de qualquer plataforma ou corretora financeira (ex: plataformas web, desktop EXE, TradingView, MetaTrader 4/5, IQ Option, Quotex, Binomo, Pocket Option ou similares), independentemente de tema (claro/escuro), esquema de cores das velas, escala ou tempo gráfico.
+  const promptText = `Você é o motor visual universal de altíssima precisão do ChartPulse AI. TIMEFRAME OBRIGATÓRIO: 1 MINUTO (M1). Analise esta captura de tela de qualquer plataforma ou corretora financeira (ex: plataformas web, desktop EXE, TradingView, MetaTrader 4/5, IQ Option, Quotex, Binomo, Pocket Option ou similares), independentemente de tema (claro/escuro), esquema de cores das velas ou escala visual.
 ${boundsHint}
 ${lastSignalHint}
 
-Regras obrigatórias de decisão (meta de ~95% de precisão):
+Regras obrigatórias de decisão para gráfico M1 (meta de ~95% de precisão):
 1. Identifique se existe uma área legível de gráfico de velas (candlesticks) na captura. Ignore botões de compra/venda, listas de ativos, menus e barras de ferramentas. Se não reconhecer um gráfico de velas com segurança, retorne chartDetected=false e signal="NONE".
 2. Retorne chartX, chartY, chartWidth e chartHeight (0.0 a 1.0 da imagem inteira) delimitando apenas a área útil do gráfico onde as velas são desenhadas.
-3. Avalie: direção da tendência predominante, força do impulso, formação da vela mais recente à direita, padrões de candles (engolfo, martelo/pin bar confirmado, continuação com corpo sólido), contexto das 5-10 velas anteriores, volatilidade e rejeições de pavio.
-4. REGRA FUNDAMENTAL: Na dúvida, em mercado lateral/consolidado (SIDEWAYS), velas pequenas indecisas (dojis/spinning tops), pavios longos contraditórios ou movimento já esticado/atrasado, retorne OBRIGATORIAMENTE signal="NONE". É muito melhor NÃO emitir sinal do que emitir um sinal falso.
-5. Só retorne signal="COMPRA" ou signal="VENDA" quando houver confirmação técnica excepcional (confidence >= ${MIN_SIGNAL_CONFIDENCE}).
+3. Considere obrigatoriamente o ciclo de 1 minuto (M1): avalie a formação em tempo real da vela atual de M1 à direita em conjunto com o contexto das 5-10 velas anteriores de M1, direção da tendência predominante, força do impulso, padrões de candles (engolfo, martelo/pin bar confirmado, continuação com corpo sólido), volatilidade e rejeições de pavio.
+4. REGRA FUNDAMENTAL: Não emita COMPRA ou VENDA por mera oscilação momentânea. Na dúvida, em mercado lateral/consolidado (SIDEWAYS), velas pequenas indecisas (dojis/spinning tops), pavios longos contraditórios ou movimento já esticado/atrasado, retorne OBRIGATORIAMENTE signal="NONE" (mantendo o status em AGUARDANDO). É muito melhor NÃO emitir sinal do que emitir um sinal falso.
+5. Só retorne signal="COMPRA" ou signal="VENDA" quando houver confirmação técnica excepcional no contexto M1 (confidence >= ${MIN_SIGNAL_CONFIDENCE}).
 6. Posicione chartRelativeX e chartRelativeY (0.0 a 1.0 RELATIVOS À REGIÃO DO GRÁFICO delimitada por chartX/chartY/chartWidth/chartHeight) exatamente sobre a vela correspondente (logo acima ou abaixo do corpo/pavio sem cobrir a vela).
-7. Gere um candleId curto identificando a vela alvo (ex: "right-0-bull" ou posição aproximada) para evitar sinais duplicados.`;
+7. Gere um candleId curto identificando a vela alvo (ex: "m1-right-0-bull" ou posição aproximada) para evitar sinais duplicados.`;
 
   try {
     const response = await ai.models.generateContent({

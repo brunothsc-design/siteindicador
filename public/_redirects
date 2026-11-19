@@ -10,4 +10,6 @@
 /api/overlay-price /.netlify/functions/overlay-price 200!
 /api/overlay/candle /.netlify/functions/overlay-candle 200!
 /api/overlay-candle /.netlify/functions/overlay-candle 200!
+/api/overlay/status /.netlify/functions/overlay-status 200!
+/api/overlay-status /.netlify/functions/overlay-status 200!
 /* /index.html 200

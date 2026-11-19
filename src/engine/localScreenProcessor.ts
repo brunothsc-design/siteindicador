@@ -12,8 +12,8 @@ export interface LocalFrameDigest {
   signature: Float32Array;
 }
 
-const GRID_W = 96;
-const GRID_H = 54;
+const GRID_W = 192;
+const GRID_H = 108;
 
 /**
  * Estimates dominant canvas background RGB from the interior region of the frame
@@ -161,27 +161,27 @@ export function processFrameLocally(
 
       // Measure contiguous horizontal run of similar mask to reject wide solid UI buttons/headers
       let horizRun = 1;
-      for (let lx = gx - 1; lx >= Math.max(0, gx - 5); lx--) {
+      for (let lx = gx - 1; lx >= Math.max(0, gx - 10); lx--) {
         if (contrastMask[gy * GRID_W + lx] || chromaCandleMask[gy * GRID_W + lx]) horizRun++;
         else break;
       }
-      for (let rx = gx + 1; rx <= Math.min(GRID_W - 1, gx + 5); rx++) {
+      for (let rx = gx + 1; rx <= Math.min(GRID_W - 1, gx + 10); rx++) {
         if (contrastMask[gy * GRID_W + rx] || chromaCandleMask[gy * GRID_W + rx]) horizRun++;
         else break;
       }
 
-      if (horizRun >= 6) {
-        continue; // Likely a solid UI button, banner, or panel border — not a candle
+      if (horizRun >= 7) {
+        continue; // Likely a solid UI button, axis price pill, or panel border — not a candle
       }
 
-      // Check vertical stroke continuity (candle body or wick)
+      // Check vertical stroke continuity (candle body or wick, +-1 or +-2 cells)
       const hasVertNeighbor =
         chromaCandleMask[(gy - 1) * GRID_W + gx] === 1 ||
         chromaCandleMask[(gy + 1) * GRID_W + gx] === 1 ||
         contrastMask[(gy - 1) * GRID_W + gx] === 1 ||
         contrastMask[(gy + 1) * GRID_W + gx] === 1;
 
-      if (isChroma || (isContrast && hasVertNeighbor && horizRun <= 3)) {
+      if (isChroma || (isContrast && hasVertNeighbor && horizRun <= 6)) {
         // Weight chroma candles higher than monochrome contrast strokes
         const weight = isChroma ? 1 : 0.65;
         totalCandleSamples += weight;
@@ -208,15 +208,14 @@ export function processFrameLocally(
     }
   }
 
-  // Trim isolated extreme 5% toolbar outliers only if enough columns exist
+  // Trim isolated extreme outlier UI icons only if enough columns/rows exist
   let minGx = GRID_W;
   let maxGx = -1;
   if (activeColIndices.length >= 6) {
-    // Keep dense cluster: drop single isolated edge column if separated by >= 8 empty columns
     let startIdx = 0;
     let endIdx = activeColIndices.length - 1;
-    if (activeColIndices[1] - activeColIndices[0] >= 8) startIdx = 1;
-    if (activeColIndices[endIdx] - activeColIndices[endIdx - 1] >= 8) endIdx--;
+    if (activeColIndices[1] - activeColIndices[0] >= 16) startIdx = 1;
+    if (activeColIndices[endIdx] - activeColIndices[endIdx - 1] >= 16) endIdx--;
     minGx = activeColIndices[startIdx];
     maxGx = activeColIndices[endIdx];
   } else if (activeColIndices.length > 0) {
@@ -229,8 +228,8 @@ export function processFrameLocally(
   if (activeRowIndices.length >= 4) {
     let startIdx = 0;
     let endIdx = activeRowIndices.length - 1;
-    if (activeRowIndices[1] - activeRowIndices[0] >= 7) startIdx = 1;
-    if (activeRowIndices[endIdx] - activeRowIndices[endIdx - 1] >= 7) endIdx--;
+    if (activeRowIndices[1] - activeRowIndices[0] >= 14) startIdx = 1;
+    if (activeRowIndices[endIdx] - activeRowIndices[endIdx - 1] >= 14) endIdx--;
     minGy = activeRowIndices[startIdx];
     maxGy = activeRowIndices[endIdx];
   } else if (activeRowIndices.length > 0) {
@@ -242,18 +241,19 @@ export function processFrameLocally(
   const spanX = maxGx >= minGx ? (maxGx - minGx + 1) / GRID_W : 0;
   const spanY = maxGy >= minGy ? (maxGy - minGy + 1) / GRID_H : 0;
 
-  // Genuine candlestick chart requires >= 5 distinct candle columns, vertical body span, and sufficient samples
+  // Genuine candlestick chart requires >= 5 distinct candle columns, vertical body span (including tight M1 ranges), and sufficient samples
   const chartDetected =
-    totalCandleSamples >= 8 &&
+    totalCandleSamples >= 12 &&
     activeColumns >= 5 &&
-    spanX >= 0.16 &&
-    spanY >= 0.1;
+    spanX >= 0.14 &&
+    spanY >= 0.055;
 
-  const padX = 0.03;
+  const padXLeft = 0.03;
+  const padXRight = 0.03;
   const padY = 0.05;
-  const left = Math.max(0, minGx / GRID_W - padX);
+  const left = Math.max(0, minGx / GRID_W - padXLeft);
   const top = Math.max(0, minGy / GRID_H - padY);
-  const right = Math.min(1, (maxGx + 1) / GRID_W + padX);
+  const right = Math.min(1, (maxGx + 1) / GRID_W + padXRight);
   const bottom = Math.min(1, (maxGy + 1) / GRID_H + padY);
 
   const chartBounds: ChartBounds | null = chartDetected
@@ -329,8 +329,7 @@ function findRightmostCandle(
   by1: number
 ): RightmostCandleInfo | null {
   const plotW = bx1 - bx0 + 1;
-  const colStep = plotW > 640 ? 2 : 1;
-  const maxCandleSpan = Math.max(22, Math.round(plotW * 0.055));
+  const maxCandleSpan = Math.max(28, Math.round(plotW * 0.075));
 
   interface ColStats {
     px: number;
@@ -339,12 +338,15 @@ function findRightmostCandle(
     bull: number;
     bear: number;
     mono: number;
+    bestRun: number;
     activeRows: number[];
   }
 
   const validCols: ColStats[] = [];
+  const tinyColoredCols: ColStats[] = [];
 
-  for (let px = bx0 + 3; px <= bx1 - 3; px += colStep) {
+  // Always scan colStep=1 so thin 1-2px M1 candles and wicks are never skipped
+  for (let px = bx0 + 2; px <= bx1 - 2; px++) {
     let run = 0;
     let runStartPy = -1;
     let bestRun = 0;
@@ -355,19 +357,46 @@ function findRightmostCandle(
     let maxPy = -1;
     const activeRows: number[] = [];
 
+    let tinyRun = 0;
+    let tinyBull = 0;
+    let tinyBear = 0;
+    let tinyMinPy = height;
+    let tinyMaxPy = -1;
+    const tinyRows: number[] = [];
+
     const commitRun = (startPy: number, endPy: number) => {
       const len = endPy - startPy + 1;
+      if (len < 2) return;
+
+      let segBull = 0;
+      let segBear = 0;
+      let segMono = 0;
+      for (let r = startPy; r <= endPy; r++) {
+        const rIdx = (r * width + px) * 4;
+        const k = classifyCandlePixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg);
+        if (k === 'BULL') segBull++;
+        else if (k === 'BEAR') segBear++;
+        else if (k === 'MONO') segMono++;
+      }
+
       if (len >= 3) {
         if (len > bestRun) bestRun = len;
         if (startPy < minPy) minPy = startPy;
         if (endPy > maxPy) maxPy = endPy;
+        bull += segBull;
+        bear += segBear;
+        mono += segMono;
         for (let r = startPy; r <= endPy; r++) {
-          const rIdx = (r * width + px) * 4;
-          const k = classifyCandlePixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg);
-          if (k === 'BULL') bull++;
-          else if (k === 'BEAR') bear++;
-          else if (k === 'MONO') mono++;
           activeRows.push(r);
+        }
+      } else if (len === 2 && (segBull >= 2 || segBear >= 2)) {
+        tinyRun = Math.max(tinyRun, 2);
+        tinyBull += segBull;
+        tinyBear += segBear;
+        if (startPy < tinyMinPy) tinyMinPy = startPy;
+        if (endPy > tinyMaxPy) tinyMaxPy = endPy;
+        for (let r = startPy; r <= endPy; r++) {
+          tinyRows.push(r);
         }
       }
     };
@@ -387,10 +416,48 @@ function findRightmostCandle(
       commitRun(runStartPy, by1 - 2);
     }
 
-    // Require genuine vertical continuity (>= 3px) so a 1-2px horizontal line is never counted as part of the candle
     if (bestRun >= 3 && activeRows.length >= 3) {
-      validCols.push({ px, minPy, maxPy, bull, bear, mono, activeRows });
+      validCols.push({ px, minPy, maxPy, bull, bear, mono, bestRun, activeRows });
+    } else if (tinyRun === 2 && tinyRows.length >= 2) {
+      tinyColoredCols.push({
+        px,
+        minPy: tinyMinPy,
+        maxPy: tinyMaxPy,
+        bull: tinyBull,
+        bear: tinyBear,
+        mono: 0,
+        bestRun: 2,
+        activeRows: tinyRows,
+      });
     }
+  }
+
+  // Group localized tiny 2px colored clusters (e.g. newly opened M1 candle) ONLY when span <= 16px
+  // so 2px horizontal price lines never merge into or spoof candles
+  if (tinyColoredCols.length > 0) {
+    let tCluster: ColStats[] = [tinyColoredCols[0]];
+    const flushTiny = () => {
+      const span = tCluster[tCluster.length - 1].px - tCluster[0].px + 1;
+      if (tCluster.length >= 2 && span <= 16) {
+        const lastValidPx = validCols.length > 0 ? validCols[validCols.length - 1].px : -1;
+        if (tCluster[0].px > lastValidPx) {
+          validCols.push(...tCluster);
+        }
+      }
+    };
+    for (let i = 1; i < tinyColoredCols.length; i++) {
+      if (
+        tinyColoredCols[i].px - tinyColoredCols[i - 1].px <= 2 &&
+        Math.abs(tinyColoredCols[i].minPy - tinyColoredCols[i - 1].minPy) <= 1
+      ) {
+        tCluster.push(tinyColoredCols[i]);
+      } else {
+        flushTiny();
+        tCluster = [tinyColoredCols[i]];
+      }
+    }
+    flushTiny();
+    validCols.sort((a, b) => a.px - b.px);
   }
 
   if (validCols.length === 0) return null;
@@ -399,7 +466,7 @@ function findRightmostCandle(
   const clusters: ColStats[][] = [];
   let current: ColStats[] = [validCols[0]];
   for (let i = 1; i < validCols.length; i++) {
-    if (validCols[i].px - validCols[i - 1].px <= colStep * 2 + 1) {
+    if (validCols[i].px - validCols[i - 1].px <= 3) {
       current.push(validCols[i]);
     } else {
       clusters.push(current);
@@ -408,26 +475,43 @@ function findRightmostCandle(
   }
   clusters.push(current);
 
-  // Filter out overly wide solid UI bars, solid flat-top/bottom price pills, and tiny 1px speckles
+  // Filter out wide solid UI bars, horizontal-only price line streaks, and flat horizontal right-axis price pills
   const candleClusters = clusters.filter((c) => {
-    const spanPx = c[c.length - 1].px - c[0].px + colStep;
+    const spanPx = c[c.length - 1].px - c[0].px + 1;
     const totalPixels = c.reduce((acc, col) => acc + col.activeRows.length, 0);
-    if (spanPx > maxCandleSpan || totalPixels < 4) return false;
+    if (spanPx > maxCandleSpan || totalPixels < 3) return false;
 
-    // A solid rectangular UI badge/pill (>= 10px wide) has uniform flat top and bottom across nearly all columns
-    if (spanPx >= 10 && c.length >= 4) {
-      let minTop = height;
-      let maxTop = -1;
-      let minBot = height;
-      let maxBot = -1;
-      let fillSum = 0;
-      for (const col of c) {
-        if (col.minPy < minTop) minTop = col.minPy;
-        if (col.minPy > maxTop) maxTop = col.minPy;
-        if (col.maxPy < minBot) minBot = col.maxPy;
-        if (col.maxPy > maxBot) maxBot = col.maxPy;
-        fillSum += col.activeRows.length / Math.max(1, col.maxPy - col.minPy + 1);
-      }
+    let minTop = height;
+    let maxTop = -1;
+    let minBot = height;
+    let maxBot = -1;
+    let fillSum = 0;
+    let heightSum = 0;
+    for (const col of c) {
+      if (col.minPy < minTop) minTop = col.minPy;
+      if (col.minPy > maxTop) maxTop = col.minPy;
+      if (col.maxPy < minBot) minBot = col.maxPy;
+      if (col.maxPy > maxBot) maxBot = col.maxPy;
+      const h = col.maxPy - col.minPy + 1;
+      heightSum += h;
+      fillSum += col.activeRows.length / Math.max(1, h);
+    }
+    const avgHeight = heightSum / c.length;
+
+    // Exclude wide 2px horizontal line streaks mistaken for candles
+    if (spanPx >= 18 && avgHeight <= 2.2) {
+      return false;
+    }
+
+    // Exclude horizontal or boundary-clipped right-axis UI price pills while keeping genuine interior wickless M1 candles and newly opened 2-4px candles
+    const touchesRightBoundary = c[c.length - 1].px >= bx1 - 6;
+    if (
+      spanPx >= 8 &&
+      c.length >= 4 &&
+      avgHeight >= 5 &&
+      avgHeight <= 24 &&
+      (spanPx >= avgHeight * 1.1 || touchesRightBoundary)
+    ) {
       const flatTopBottom = maxTop - minTop <= 1 && maxBot - minBot <= 1;
       const solidFill = fillSum / c.length >= 0.88;
       if (flatTopBottom && solidFill) {
@@ -478,10 +562,10 @@ function findRightmostCandle(
   let closePy: number | null = null;
   let confidence = 0;
 
-  if (bullTotal >= 5 && bullTotal > bearTotal * 1.5) {
+  if (bullTotal >= 4 && bullTotal > bearTotal * 1.4) {
     closePy = bodyTop;
     confidence = 0.78;
-  } else if (bearTotal >= 5 && bearTotal > bullTotal * 1.5) {
+  } else if (bearTotal >= 4 && bearTotal > bullTotal * 1.4) {
     closePy = bodyBottom;
     confidence = 0.78;
   } else if (monoTotal >= 5 && bodyBottom - bodyTop <= 4) {
@@ -536,17 +620,17 @@ function hasRightAxisPricePill(
 
   if (bestRun < 14 || bestStart < 0) return false;
 
-  // Verify the pill has solid thickness (>= 5 rows) around centerPy AND is bounded vertically (not a full sidebar)
+  // Verify the pill has solid thickness (>= 4 rows) around centerPy AND is bounded vertically (not a full sidebar)
   let thickRows = 0;
-  for (let py = Math.max(0, centerPy - 6); py <= Math.min(height - 1, centerPy + 6); py++) {
+  for (let py = Math.max(0, centerPy - 9); py <= Math.min(height - 1, centerPy + 9); py++) {
     let hits = 0;
     let total = 0;
     for (let px = bestStart; px <= bestEnd; px += 2) {
       const idx = (py * width + px) * 4;
-      if (colorDist(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg.r, bg.g, bg.b) >= 50) hits++;
+      if (colorDist(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg.r, bg.g, bg.b) >= 42) hits++;
       total++;
     }
-    if (total > 0 && hits / total >= 0.75) {
+    if (total > 0 && hits / total >= 0.7) {
       thickRows++;
     }
   }
@@ -554,20 +638,20 @@ function hasRightAxisPricePill(
   let aboveHits = 0;
   let belowHits = 0;
   let samples = 0;
-  const checkAbove = Math.max(0, centerPy - 12);
-  const checkBelow = Math.min(height - 1, centerPy + 12);
+  const checkAbove = Math.max(0, centerPy - 15);
+  const checkBelow = Math.min(height - 1, centerPy + 15);
   for (let px = bestStart; px <= bestEnd; px += 2) {
     const idxA = (checkAbove * width + px) * 4;
     const idxB = (checkBelow * width + px) * 4;
-    if (colorDist(rgba[idxA], rgba[idxA + 1], rgba[idxA + 2], bg.r, bg.g, bg.b) >= 50) aboveHits++;
-    if (colorDist(rgba[idxB], rgba[idxB + 1], rgba[idxB + 2], bg.r, bg.g, bg.b) >= 50) belowHits++;
+    if (colorDist(rgba[idxA], rgba[idxA + 1], rgba[idxA + 2], bg.r, bg.g, bg.b) >= 42) aboveHits++;
+    if (colorDist(rgba[idxB], rgba[idxB + 1], rgba[idxB + 2], bg.r, bg.g, bg.b) >= 42) belowHits++;
     samples++;
   }
 
   const boundedVertically =
     samples > 0 && aboveHits / samples < 0.35 && belowHits / samples < 0.35;
 
-  return thickRows >= 5 && thickRows <= 13 && boundedVertically;
+  return thickRows >= 4 && thickRows <= 18 && boundedVertically;
 }
 
 /**
@@ -633,7 +717,7 @@ export function detectChartPriceLine(
       const b = rgba[idx + 2];
       const diff = colorDist(r, g, b, bg.r, bg.g, bg.b);
 
-      if (diff >= 36) {
+      if (diff >= 28) {
         rightHits++;
         sumR += r;
         sumG += g;
@@ -645,7 +729,7 @@ export function detectChartPriceLine(
         const idxDn = ((py + 3) * width + px) * 4;
         const dUp = colorDist(rgba[idxUp], rgba[idxUp + 1], rgba[idxUp + 2], bg.r, bg.g, bg.b);
         const dDn = colorDist(rgba[idxDn], rgba[idxDn + 1], rgba[idxDn + 2], bg.r, bg.g, bg.b);
-        if (dUp < 30 && dDn < 30) {
+        if (dUp < 32 && dDn < 32) {
           isolatedRightHits++;
         }
       }
@@ -654,11 +738,12 @@ export function detectChartPriceLine(
     const rightCoverage = rightHits / rightSpanCols;
     const isolatedCoverage = isolatedRightHits / rightSpanCols;
 
-    if (rightCoverage >= 0.42 && isolatedCoverage >= 0.30 && rightHits >= 6) {
+    // Supports both solid price lines (>=0.45) and dashed/dotted broker lines (>=0.28 coverage)
+    if (rightCoverage >= 0.28 && isolatedCoverage >= 0.20 && rightHits >= 6) {
       let fullHits = 0;
       for (let px = bx0 + 4; px <= bx1 - 2; px += fullStep) {
         const idx = (py * width + px) * 4;
-        if (colorDist(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg.r, bg.g, bg.b) >= 36) {
+        if (colorDist(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg.r, bg.g, bg.b) >= 28) {
           fullHits++;
         }
       }
@@ -735,21 +820,24 @@ export function detectChartPriceLine(
 
     const nearCandle =
       rightmost !== null &&
-      band.py >= rightmost.topPy - 12 &&
-      band.py <= rightmost.bottomPy + 12;
+      band.py >= rightmost.topPy - 16 &&
+      band.py <= rightmost.bottomPy + 16;
 
     let score = 0;
     if (band.rightCoverage >= 0.55) score += 0.35;
-    else if (band.rightCoverage >= 0.42) score += 0.25;
+    else if (band.rightCoverage >= 0.40) score += 0.28;
+    else if (band.rightCoverage >= 0.28) score += 0.22;
 
     if (band.hasAxisPill) score += 0.38;
-    if (nearCandle) score += 0.24;
-    if (band.saturation >= 45 || band.avgBgDiff >= 120) score += 0.14;
+    if (nearCandle) score += 0.28;
+    if (band.saturation >= 40 || (band.avgBgDiff >= 105 && (band.saturation >= 20 || band.hasAxisPill))) {
+      score += 0.16;
+    }
     if (band.fullCoverage >= 0.65 && filteredBands.length === 1) score += 0.08;
 
     // Require either axis pill confirmation OR alignment with rightmost candle + clear line
     const verifiedAnchor = band.hasAxisPill || nearCandle;
-    if (verifiedAnchor && score >= 0.72) {
+    if (verifiedAnchor && score >= 0.68) {
       const clamped = Math.min(0.98, Number(score.toFixed(2)));
       if (!bestLine || clamped > bestLine.confidence) {
         bestLine = { py: band.py, confidence: clamped };

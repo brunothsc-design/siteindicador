@@ -48,12 +48,24 @@ export interface LiveCandleTracker {
   updatedAt: number;
 }
 
+export type OperationalStatusValue = 'AGUARDANDO' | 'COMPRA' | 'VENDA';
+
+export interface OperationalStatusState {
+  status: OperationalStatusValue;
+  timeframe: 'M1';
+  confidence: number;
+  chartBounds: ChartBounds | null;
+  expiresAt: number | null;
+  updatedAt: number;
+}
+
 export interface OverlayState {
   active: boolean;
   sessionId: string | null;
   signal: VisualSignal | null;
   priceLine: PriceLine | null;
   liveCandle: LiveCandleTracker | null;
+  operationalStatus?: OperationalStatusState | null;
   chartBounds: ChartBounds | null;
   updatedAt: number;
 }

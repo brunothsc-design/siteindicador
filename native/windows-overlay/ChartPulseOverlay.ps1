@@ -97,12 +97,45 @@ $form.Add_Paint({
     $hasLiveCandle = $null -ne $state.liveCandle
     $dir = if ($null -ne $state.signal) { [string]$state.signal.direction } else { "" }
     $hasSignal = ($dir -eq "COMPRA" -or $dir -eq "VENDA")
+    $opStatus = if ($null -ne $state.operationalStatus -and $state.operationalStatus.status) { [string]$state.operationalStatus.status } elseif ($hasSignal) { $dir } else { "AGUARDANDO" }
+    $hasOpStatus = [bool]$state.active
 
-    if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasSignal) {
+    if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasSignal -and -not $hasOpStatus) {
         return
     }
 
     $g = $e.Graphics
+
+    if ($hasOpStatus) {
+        $sBounds = if ($null -ne $state.operationalStatus -and $null -ne $state.operationalStatus.chartBounds) { $state.operationalStatus.chartBounds } else { $state.chartBounds }
+        $anchorBx = if ($null -ne $sBounds) { [double]$sBounds.x } else { 0.045 }
+        $anchorBy = if ($null -ne $sBounds) { [double]$sBounds.y } else { 0.04 }
+        $sx = [float]([Math]::Min(0.82, [Math]::Max(0.02, $anchorBx + 0.015)) * $form.ClientSize.Width)
+        $sy = [float]([Math]::Min(0.85, [Math]::Max(0.03, $anchorBy + 0.02)) * $form.ClientSize.Height)
+
+        $stColor = if ($opStatus -eq "COMPRA") {
+            [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
+        } elseif ($opStatus -eq "VENDA") {
+            [System.Drawing.Color]::FromArgb(255, 239, 68, 68)
+        } else {
+            [System.Drawing.Color]::FromArgb(255, 251, 191, 36)
+        }
+
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
+        $stFont = New-Object System.Drawing.Font("Consolas", 11, [System.Drawing.FontStyle]::Bold)
+        $stBg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 11, 14, 17))
+        $stBorder = New-Object System.Drawing.Pen($stColor, 1)
+        $stBrush = New-Object System.Drawing.SolidBrush($stColor)
+        $stSize = $g.MeasureString($opStatus, $stFont)
+        $g.FillRectangle($stBg, $sx, $sy, $stSize.Width + 14, $stSize.Height + 6)
+        $g.DrawRectangle($stBorder, $sx, $sy, $stSize.Width + 14, $stSize.Height + 6)
+        $g.DrawString($opStatus, $stFont, $stBrush, $sx + 7, $sy + 3)
+        $stFont.Dispose()
+        $stBg.Dispose()
+        $stBorder.Dispose()
+        $stBrush.Dispose()
+    }
 
     if ($hasPriceLine) {
         $pBounds = if ($null -ne $state.priceLine.chartBounds) { $state.priceLine.chartBounds } else { $state.chartBounds }
@@ -247,10 +280,12 @@ $pollTimer.Add_Tick({
         $parsed = $json | ConvertFrom-Json
         $prevSig = if ($null -ne $script:CurrentState -and $null -ne $script:CurrentState.signal) { $script:CurrentState.signal.id } else { $null }
         $nextSig = if ($null -ne $parsed -and $null -ne $parsed.signal) { $parsed.signal.id } else { $null }
+        $prevOpStatus = if ($null -ne $script:CurrentState -and $null -ne $script:CurrentState.operationalStatus) { $script:CurrentState.operationalStatus.status } else { $null }
+        $nextOpStatus = if ($null -ne $parsed -and $null -ne $parsed.operationalStatus) { $parsed.operationalStatus.status } else { $null }
         $prevActive = if ($null -ne $script:CurrentState) { $script:CurrentState.active } else { $false }
         $prevUpdated = if ($null -ne $script:CurrentState) { $script:CurrentState.updatedAt } else { 0 }
 
-        if ($prevSig -ne $nextSig -or $prevActive -ne $parsed.active -or $prevUpdated -ne $parsed.updatedAt) {
+        if ($prevSig -ne $nextSig -or $prevOpStatus -ne $nextOpStatus -or $prevActive -ne $parsed.active -or $prevUpdated -ne $parsed.updatedAt) {
             $script:CurrentState = $parsed
             $form.Invalidate()
         }

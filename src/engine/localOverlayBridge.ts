@@ -1,4 +1,9 @@
-import type { LiveCandleTracker, PriceLine, VisualSignal } from '../types/signals.ts';
+import type {
+  LiveCandleTracker,
+  OperationalStatusState,
+  PriceLine,
+  VisualSignal,
+} from '../types/signals.ts';
 
 export const LOCAL_OVERLAY_URL = 'http://127.0.0.1:47821';
 
@@ -8,8 +13,17 @@ export interface LocalOverlayHealthResponse {
   ok: boolean;
   component?: string;
   version?: string;
+  priceLineSupported?: boolean;
+  liveCandleSupported?: boolean;
+  operationalStatusSupported?: boolean;
   active?: boolean;
   autoStartEnabled?: boolean;
+  targetBounds?: string;
+  priceLineUpdates?: number;
+  liveCandleUpdates?: number;
+  statusUpdates?: number;
+  signalUpdates?: number;
+  paintCount?: number;
 }
 
 /**
@@ -81,24 +95,27 @@ async function fetchLocalOverlay(
   }
 }
 
-export async function checkLocalOverlayHealth(): Promise<boolean> {
+export async function checkLocalOverlayHealth(): Promise<LocalOverlayHealthResponse | null> {
   const res = await fetchLocalOverlay('/health', { method: 'GET' }, 1100);
-  if (!res || !res.ok) return false;
+  if (!res || !res.ok) return null;
   try {
     const data = (await res.json()) as LocalOverlayHealthResponse;
-    return Boolean(data?.ok);
+    return data?.ok ? data : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export async function notifyLocalOverlaySession(sessionId: string): Promise<boolean> {
+export async function notifyLocalOverlaySession(
+  sessionId: string,
+  displaySurface = 'unknown'
+): Promise<boolean> {
   const res = await fetchLocalOverlay(
     '/overlay/session',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, displaySurface }),
     },
     1400
   );
@@ -155,6 +172,25 @@ export async function pushLocalOverlayCandle(
       body: JSON.stringify({
         sessionId,
         liveCandle,
+      }),
+    },
+    1000
+  );
+  return Boolean(res && res.ok);
+}
+
+export async function pushLocalOverlayStatus(
+  sessionId: string,
+  operationalStatus: OperationalStatusState | null
+): Promise<boolean> {
+  const res = await fetchLocalOverlay(
+    '/overlay/status',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        operationalStatus,
       }),
     },
     1000

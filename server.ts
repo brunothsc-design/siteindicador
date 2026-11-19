@@ -11,6 +11,7 @@ import {
 import type {
   AnalyzeFrameRequest,
   LiveCandleTracker,
+  OperationalStatusState,
   OverlayState,
   PriceLine,
   VisualSignal,
@@ -29,6 +30,7 @@ const overlayState: OverlayState = {
   signal: null,
   priceLine: null,
   liveCandle: null,
+  operationalStatus: null,
   chartBounds: null,
   updatedAt: Date.now(),
 };
@@ -60,6 +62,19 @@ async function startServer(): Promise<void> {
   });
 
   app.get('/api/overlay/state', (_req: Request, res: Response) => {
+    const now = Date.now();
+    if (overlayState.active && overlayState.signal && now > overlayState.signal.expiresAt) {
+      overlayState.signal = null;
+      overlayState.operationalStatus = {
+        status: 'AGUARDANDO',
+        timeframe: 'M1',
+        confidence: 0,
+        chartBounds: overlayState.chartBounds,
+        expiresAt: null,
+        updatedAt: now,
+      };
+      overlayState.updatedAt = now;
+    }
     res.json(overlayState);
   });
 
@@ -96,13 +111,22 @@ async function startServer(): Promise<void> {
     }
 
     deactivatedSessions.delete(sessionId);
+    const now = Date.now();
     overlayState.active = true;
     overlayState.sessionId = sessionId;
     overlayState.signal = null;
     overlayState.priceLine = null;
     overlayState.liveCandle = null;
+    overlayState.operationalStatus = {
+      status: 'AGUARDANDO',
+      timeframe: 'M1',
+      confidence: 0,
+      chartBounds: null,
+      expiresAt: null,
+      updatedAt: now,
+    };
     overlayState.chartBounds = null;
-    overlayState.updatedAt = Date.now();
+    overlayState.updatedAt = now;
     broadcastOverlayState();
 
     res.json({ ok: true, sessionId });
@@ -146,6 +170,38 @@ async function startServer(): Promise<void> {
     res.json({ ok: true });
   });
 
+  app.post('/api/overlay/status', (req: Request, res: Response) => {
+    const body = req.body as { sessionId?: string; operationalStatus?: OperationalStatusState | null };
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+    if (!sessionId || deactivatedSessions.has(sessionId) || overlayState.sessionId !== sessionId) {
+      res.json({ ok: true, ignored: true });
+      return;
+    }
+
+    const incoming = body?.operationalStatus;
+    const rawStatus = String(incoming?.status ?? 'AGUARDANDO').toUpperCase();
+    const safeStatus =
+      rawStatus === 'COMPRA' || rawStatus === 'VENDA' ? rawStatus : 'AGUARDANDO';
+
+    const nextStatus: OperationalStatusState = {
+      status: safeStatus,
+      timeframe: 'M1',
+      confidence: typeof incoming?.confidence === 'number' ? incoming.confidence : 0,
+      chartBounds: incoming?.chartBounds ?? overlayState.chartBounds ?? null,
+      expiresAt: typeof incoming?.expiresAt === 'number' ? incoming.expiresAt : null,
+      updatedAt: Date.now(),
+    };
+
+    overlayState.operationalStatus = nextStatus;
+    if (nextStatus.chartBounds) {
+      overlayState.chartBounds = nextStatus.chartBounds;
+    }
+    overlayState.updatedAt = Date.now();
+    broadcastOverlayState();
+
+    res.json({ ok: true });
+  });
+
   app.post('/api/overlay/clear', (req: Request, res: Response) => {
     const body = req.body as { sessionId?: string };
     if (typeof body?.sessionId === 'string' && body.sessionId) {
@@ -164,6 +220,7 @@ async function startServer(): Promise<void> {
     overlayState.signal = null;
     overlayState.priceLine = null;
     overlayState.liveCandle = null;
+    overlayState.operationalStatus = null;
     overlayState.chartBounds = null;
     overlayState.updatedAt = Date.now();
     broadcastOverlayState();
@@ -191,8 +248,9 @@ async function startServer(): Promise<void> {
       }
 
       if (result.body.signal === 'COMPRA' || result.body.signal === 'VENDA') {
+        const now = Date.now();
         const nextSignal: VisualSignal = {
-          id: `${sessionId}-${Date.now()}`,
+          id: `${sessionId}-${now}`,
           direction: result.body.signal,
           candleX: result.body.candleX,
           candleY: result.body.candleY,
@@ -202,15 +260,32 @@ async function startServer(): Promise<void> {
           confidence: result.body.confidence,
           candleId: result.body.candleId,
           marketRegime: result.body.marketRegime,
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 18000,
+          createdAt: now,
+          expiresAt: now + 18000,
         };
         overlayState.signal = nextSignal;
-        overlayState.updatedAt = Date.now();
+        overlayState.operationalStatus = {
+          status: nextSignal.direction,
+          timeframe: 'M1',
+          confidence: nextSignal.confidence,
+          chartBounds: nextSignal.chartBounds ?? overlayState.chartBounds,
+          expiresAt: nextSignal.expiresAt,
+          updatedAt: now,
+        };
+        overlayState.updatedAt = now;
         broadcastOverlayState();
       } else if (overlayState.signal && Date.now() > overlayState.signal.expiresAt) {
+        const now = Date.now();
         overlayState.signal = null;
-        overlayState.updatedAt = Date.now();
+        overlayState.operationalStatus = {
+          status: 'AGUARDANDO',
+          timeframe: 'M1',
+          confidence: 0,
+          chartBounds: overlayState.chartBounds,
+          expiresAt: null,
+          updatedAt: now,
+        };
+        overlayState.updatedAt = now;
         broadcastOverlayState();
       }
     }

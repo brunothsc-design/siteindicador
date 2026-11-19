@@ -50,13 +50,16 @@ html, body { margin:0; padding:0; width:100vw; height:100vh; overflow:hidden; ba
 #line { position:fixed; height:2px; background:#38BDF8; box-shadow:0 0 4px #000,0 1px 1px #000; transform:translateY(-50%); display:none; }
 #live { position:fixed; width:16px; height:16px; border-radius:9999px; border:2px solid #FBBF24; background:rgba(11,14,17,0.45); box-shadow:0 0 6px #000; transform:translate(-50%,-50%); display:none; align-items:center; justify-content:center; }
 #liveDot { width:6px; height:6px; border-radius:9999px; background:#FBBF24; }
+#opStatus { position:fixed; padding:2px 8px; border-radius:4px; font:700 12px/1.2 Consolas,monospace; letter-spacing:0.06em; background:rgba(11,14,17,0.78); box-shadow:0 2px 6px rgba(0,0,0,0.85); display:none; }
 #sig { position:fixed; transform:translate(-50%,-50%); font:700 16px/1 Consolas,monospace; letter-spacing:0.06em; text-shadow:0 1px 2px #000,0 0 8px #000; display:none; }
 </style></head>
 <body>
+<div id="opStatus"></div>
 <div id="line"></div>
 <div id="live"><div id="liveDot"></div></div>
 <div id="sig"></div>
 <script>
+const opEl = document.getElementById('opStatus');
 const lineEl = document.getElementById('line');
 const liveEl = document.getElementById('live');
 const liveDotEl = document.getElementById('liveDot');
@@ -66,11 +69,23 @@ es.onmessage = (ev) => {
   try {
     const s = JSON.parse(ev.data);
     if (!s.active) {
+      opEl.style.display = 'none';
       lineEl.style.display = 'none';
       liveEl.style.display = 'none';
       el.style.display = 'none';
       return;
     }
+    const statusText = (s.operationalStatus && s.operationalStatus.status) || (s.signal && s.signal.direction) || 'AGUARDANDO';
+    const sb = (s.operationalStatus && s.operationalStatus.chartBounds) || s.chartBounds;
+    const sLeft = sb ? Math.min(0.82, Math.max(0.02, sb.x + 0.015)) : 0.06;
+    const sTop = sb ? Math.min(0.85, Math.max(0.03, sb.y + 0.02)) : 0.06;
+    const sColor = statusText === 'COMPRA' ? '#22C55E' : (statusText === 'VENDA' ? '#EF4444' : '#FBBF24');
+    opEl.textContent = statusText;
+    opEl.style.left = (sLeft * 100) + '%';
+    opEl.style.top = (sTop * 100) + '%';
+    opEl.style.color = sColor;
+    opEl.style.border = '1px solid ' + sColor;
+    opEl.style.display = 'block';
     if (s.priceLine) {
       const b = s.priceLine.chartBounds || s.chartBounds;
       const top = b ? b.y + s.priceLine.chartRelativeY * b.height : s.priceLine.y;
@@ -104,12 +119,13 @@ es.onmessage = (ev) => {
     el.style.top = (s.signal.candleY * 100) + '%';
     el.style.display = 'block';
   } catch {
+    opEl.style.display = 'none';
     lineEl.style.display = 'none';
     liveEl.style.display = 'none';
     el.style.display = 'none';
   }
 };
-es.onerror = () => { lineEl.style.display = 'none'; liveEl.style.display = 'none'; el.style.display = 'none'; };
+es.onerror = () => { opEl.style.display = 'none'; lineEl.style.display = 'none'; liveEl.style.display = 'none'; el.style.display = 'none'; };
 </script>
 </body>
 </html>`;

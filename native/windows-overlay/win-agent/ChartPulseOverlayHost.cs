@@ -58,12 +58,25 @@ namespace ChartPulseOverlayAgent
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetProcessDPIAware();
+
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     }
 
     internal sealed class OverlayPayload
     {
         public bool Active;
         public string SessionId = string.Empty;
+        public string DisplaySurface = "window"; // "window", "monitor", or "browser"
         public string Direction = string.Empty; // COMPRA or VENDA
         public double CandleX = 0.5;
         public double CandleY = 0.5;
@@ -99,6 +112,14 @@ namespace ChartPulseOverlayAgent
         public double LiveCandleBoundsH;
         public long LiveCandleUpdatedAtMs;
 
+        public string OperationalStatus = string.Empty; // AGUARDANDO, COMPRA, VENDA
+        public bool HasStatusBounds;
+        public double StatusBoundsX;
+        public double StatusBoundsY;
+        public double StatusBoundsW;
+        public double StatusBoundsH;
+        public long StatusUpdatedAtMs;
+
         public OverlayPayload Clone()
         {
             return (OverlayPayload)MemberwiseClone();
@@ -111,6 +132,12 @@ namespace ChartPulseOverlayAgent
         private OverlayPayload _state = new OverlayPayload();
         private IntPtr _targetHwnd = IntPtr.Zero;
         private readonly System.Windows.Forms.Timer _trackTimer;
+        private long _priceLineUpdates;
+        private long _liveCandleUpdates;
+        private long _statusUpdates;
+        private long _signalUpdates;
+        private long _paintCount;
+        private Rectangle _lastTargetBounds = new Rectangle(0, 0, 1, 1);
 
         private static readonly HashSet<string> IgnoredClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -131,7 +158,11 @@ namespace ChartPulseOverlayAgent
             BackColor = Color.Magenta;
             TransparencyKey = Color.Magenta;
             StartPosition = FormStartPosition.Manual;
-            Bounds = new Rectangle(0, 0, 1, 1);
+            Rectangle initialScreen = Screen.PrimaryScreen != null
+                ? Screen.PrimaryScreen.Bounds
+                : new Rectangle(0, 0, 1280, 720);
+            Bounds = initialScreen;
+            _lastTargetBounds = initialScreen;
 
             _trackTimer = new System.Windows.Forms.Timer();
             _trackTimer.Interval = 50;
@@ -139,9 +170,34 @@ namespace ChartPulseOverlayAgent
             _trackTimer.Start();
         }
 
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= Win32Native.WS_EX_LAYERED
+                    | Win32Native.WS_EX_TRANSPARENT
+                    | Win32Native.WS_EX_TOPMOST
+                    | Win32Native.WS_EX_TOOLWINDOW
+                    | Win32Native.WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            ApplyOverlayStylesAndTopMost();
+        }
+
+        private void ApplyOverlayStylesAndTopMost()
+        {
+            if (!IsHandleCreated) return;
             int exStyle = Win32Native.GetWindowLong(Handle, Win32Native.GWL_EXSTYLE);
             int nextStyle = exStyle
                 | Win32Native.WS_EX_LAYERED
@@ -150,17 +206,42 @@ namespace ChartPulseOverlayAgent
                 | Win32Native.WS_EX_TOOLWINDOW
                 | Win32Native.WS_EX_NOACTIVATE;
             Win32Native.SetWindowLong(Handle, Win32Native.GWL_EXSTYLE, nextStyle);
+            Win32Native.SetWindowPos(
+                Handle,
+                Win32Native.HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                Win32Native.SWP_NOMOVE | Win32Native.SWP_NOSIZE | Win32Native.SWP_NOACTIVATE
+            );
         }
 
-        public void StartSession(string sessionId)
+        public void StartSession(string sessionId, string displaySurface)
         {
+            string normalizedSurface = string.IsNullOrEmpty(displaySurface) ? "window" : displaySurface;
             lock (_stateLock)
             {
-                _state = new OverlayPayload
+                // Preserve early price/candle/status updates if /overlay/session arrives slightly after them for the same sessionId
+                if (!string.IsNullOrEmpty(sessionId) && _state.SessionId == sessionId)
                 {
-                    Active = !string.IsNullOrEmpty(sessionId),
-                    SessionId = sessionId ?? string.Empty
-                };
+                    _state.Active = true;
+                    _state.DisplaySurface = normalizedSurface;
+                    if (string.IsNullOrEmpty(_state.OperationalStatus))
+                    {
+                        _state.OperationalStatus = "AGUARDANDO";
+                    }
+                }
+                else
+                {
+                    _state = new OverlayPayload
+                    {
+                        Active = !string.IsNullOrEmpty(sessionId),
+                        SessionId = sessionId ?? string.Empty,
+                        DisplaySurface = normalizedSurface,
+                        OperationalStatus = !string.IsNullOrEmpty(sessionId) ? "AGUARDANDO" : string.Empty
+                    };
+                }
             }
             RequestRepaint();
         }
@@ -206,6 +287,7 @@ namespace ChartPulseOverlayAgent
                 _state.PriceBoundsH = bh;
                 _state.PriceUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
+            Interlocked.Increment(ref _priceLineUpdates);
             RequestRepaint();
         }
 
@@ -247,6 +329,43 @@ namespace ChartPulseOverlayAgent
                 _state.LiveCandleBoundsH = bh;
                 _state.LiveCandleUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
+            Interlocked.Increment(ref _liveCandleUpdates);
+            RequestRepaint();
+        }
+
+        public void UpdateOperationalStatus(
+            string sessionId,
+            string status,
+            bool hasStatusBounds,
+            double bx,
+            double by,
+            double bw,
+            double bh)
+        {
+            string safeStatus = (status == "COMPRA" || status == "VENDA") ? status : "AGUARDANDO";
+            lock (_stateLock)
+            {
+                if (_state.SessionId != sessionId)
+                {
+                    _state = new OverlayPayload
+                    {
+                        Active = true,
+                        SessionId = sessionId ?? string.Empty
+                    };
+                }
+                _state.Active = true;
+                _state.OperationalStatus = safeStatus;
+                if (hasStatusBounds)
+                {
+                    _state.HasStatusBounds = true;
+                    _state.StatusBoundsX = bx;
+                    _state.StatusBoundsY = by;
+                    _state.StatusBoundsW = bw;
+                    _state.StatusBoundsH = bh;
+                }
+                _state.StatusUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+            Interlocked.Increment(ref _statusUpdates);
             RequestRepaint();
         }
 
@@ -286,7 +405,9 @@ namespace ChartPulseOverlayAgent
                 _state.BoundsW = bw;
                 _state.BoundsH = bh;
                 _state.ExpiresAtMs = expiresAtMs;
+                _state.OperationalStatus = (direction == "COMPRA" || direction == "VENDA") ? direction : "AGUARDANDO";
             }
+            Interlocked.Increment(ref _signalUpdates);
             RequestRepaint();
         }
 
@@ -306,6 +427,36 @@ namespace ChartPulseOverlayAgent
             }
         }
 
+        public string BuildDiagnosticsJson(bool autoStart)
+        {
+            bool active;
+            string surface;
+            string opStatus;
+            lock (_stateLock)
+            {
+                active = _state.Active;
+                surface = _state.DisplaySurface;
+                opStatus = string.IsNullOrEmpty(_state.OperationalStatus)
+                    ? (active ? "AGUARDANDO" : "NONE")
+                    : _state.OperationalStatus;
+            }
+            Rectangle b = _lastTargetBounds;
+            string boundsText = string.Format("{0},{1},{2}x{3}", b.X, b.Y, b.Width, b.Height);
+            return string.Format(
+                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.0\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9}}}",
+                active ? "true" : "false",
+                autoStart ? "true" : "false",
+                surface,
+                opStatus,
+                boundsText,
+                Interlocked.Read(ref _priceLineUpdates),
+                Interlocked.Read(ref _liveCandleUpdates),
+                Interlocked.Read(ref _statusUpdates),
+                Interlocked.Read(ref _signalUpdates),
+                Interlocked.Read(ref _paintCount)
+            );
+        }
+
         private void OnTrackTick(object sender, EventArgs e)
         {
             OverlayPayload snapshot;
@@ -322,6 +473,7 @@ namespace ChartPulseOverlayAgent
                     {
                         _state.Direction = string.Empty;
                         _state.ExpiresAtMs = 0;
+                        _state.OperationalStatus = "AGUARDANDO";
                     }
                 }
                 Invalidate();
@@ -346,6 +498,24 @@ namespace ChartPulseOverlayAgent
                 }
             }
 
+            if (snapshot.DisplaySurface == "monitor")
+            {
+                Screen activeScreen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen;
+                Rectangle monitorBounds = activeScreen != null ? activeScreen.Bounds : new Rectangle(0, 0, 1280, 720);
+                _lastTargetBounds = monitorBounds;
+                if (Bounds != monitorBounds)
+                {
+                    Bounds = monitorBounds;
+                    Invalidate();
+                }
+                if (snapshot.Active)
+                {
+                    if (!Visible) Show();
+                    ApplyOverlayStylesAndTopMost();
+                }
+                return;
+            }
+
             if (_targetHwnd != IntPtr.Zero && Win32Native.IsWindow(_targetHwnd))
             {
                 if (Win32Native.IsIconic(_targetHwnd))
@@ -368,12 +538,30 @@ namespace ChartPulseOverlayAgent
                     int w = Math.Max(1, rect.Right - rect.Left);
                     int h = Math.Max(1, rect.Bottom - rect.Top);
                     Rectangle targetBounds = new Rectangle(rect.Left, rect.Top, w, h);
+                    _lastTargetBounds = targetBounds;
                     if (Bounds != targetBounds)
                     {
                         Bounds = targetBounds;
                         Invalidate();
                     }
                     if (!Visible) Show();
+                    if (snapshot.Active) ApplyOverlayStylesAndTopMost();
+                }
+            }
+            else if (snapshot.Active)
+            {
+                // Fallback so overlay never stays trapped at 1x1 pixel before another foreground window is clicked
+                Screen fallbackScreen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen;
+                if (fallbackScreen != null)
+                {
+                    _lastTargetBounds = fallbackScreen.Bounds;
+                    if (Bounds != fallbackScreen.Bounds)
+                    {
+                        Bounds = fallbackScreen.Bounds;
+                        Invalidate();
+                    }
+                    if (!Visible) Show();
+                    ApplyOverlayStylesAndTopMost();
                 }
             }
         }
@@ -390,13 +578,62 @@ namespace ChartPulseOverlayAgent
             bool hasSignal = snapshot.Active && (snapshot.Direction == "COMPRA" || snapshot.Direction == "VENDA");
             bool hasPriceLine = snapshot.Active && snapshot.HasPriceLine;
             bool hasLiveCandle = snapshot.Active && snapshot.HasLiveCandle;
+            bool hasOpStatus = snapshot.Active;
 
-            if (!hasSignal && !hasPriceLine && !hasLiveCandle)
+            if (!hasSignal && !hasPriceLine && !hasLiveCandle && !hasOpStatus)
             {
                 return;
             }
 
+            Interlocked.Increment(ref _paintCount);
             Graphics g = e.Graphics;
+
+            if (hasOpStatus)
+            {
+                string statusText = (snapshot.OperationalStatus == "COMPRA" || snapshot.OperationalStatus == "VENDA")
+                    ? snapshot.OperationalStatus
+                    : (hasSignal ? snapshot.Direction : "AGUARDANDO");
+
+                double anchorBx = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsX
+                    : (snapshot.HasPriceBounds
+                        ? snapshot.PriceBoundsX
+                        : (snapshot.HasLiveCandleBounds
+                            ? snapshot.LiveCandleBoundsX
+                            : (snapshot.HasBounds ? snapshot.BoundsX : 0.045)));
+                double anchorBy = snapshot.HasStatusBounds
+                    ? snapshot.StatusBoundsY
+                    : (snapshot.HasPriceBounds
+                        ? snapshot.PriceBoundsY
+                        : (snapshot.HasLiveCandleBounds
+                            ? snapshot.LiveCandleBoundsY
+                            : (snapshot.HasBounds ? snapshot.BoundsY : 0.04)));
+
+                float sx = (float)(Math.Min(0.82, Math.Max(0.02, anchorBx + 0.015)) * ClientSize.Width);
+                float sy = (float)(Math.Min(0.85, Math.Max(0.03, anchorBy + 0.02)) * ClientSize.Height);
+
+                Color statusColor = statusText == "COMPRA"
+                    ? Color.FromArgb(255, 34, 197, 94)
+                    : (statusText == "VENDA"
+                        ? Color.FromArgb(255, 239, 68, 68)
+                        : Color.FromArgb(255, 251, 191, 36));
+
+                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                using (Font statusFont = new Font("Consolas", 11f, FontStyle.Bold))
+                using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(245, 11, 14, 17)))
+                using (Pen statusBorder = new Pen(statusColor, 1f))
+                using (SolidBrush statusBrush = new SolidBrush(statusColor))
+                {
+                    SizeF stSize = g.MeasureString(statusText, statusFont);
+                    float padX = 7f;
+                    float padY = 3f;
+                    RectangleF box = new RectangleF(sx, sy, stSize.Width + padX * 2f, stSize.Height + padY * 2f);
+                    g.FillRectangle(statusBg, box);
+                    g.DrawRectangle(statusBorder, box.X, box.Y, box.Width, box.Height);
+                    g.DrawString(statusText, statusFont, statusBrush, sx + padX, sy + padY);
+                }
+            }
 
             if (hasPriceLine)
             {
@@ -511,6 +748,7 @@ namespace ChartPulseOverlayAgent
                 return;
             }
 
+            try { Win32Native.SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -678,17 +916,8 @@ namespace ChartPulseOverlayAgent
 
             if (req.HttpMethod == "GET" && path == "/health")
             {
-                bool active = _overlayForm.IsAnalysisActive();
                 bool autoStart = IsAutoStartRegistered();
-                WriteJson(
-                    res,
-                    200,
-                    string.Format(
-                        "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.2.0\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"active\":{0},\"autoStartEnabled\":{1}}}",
-                        active ? "true" : "false",
-                        autoStart ? "true" : "false"
-                    )
-                );
+                WriteJson(res, 200, _overlayForm.BuildDiagnosticsJson(autoStart));
                 return;
             }
 
@@ -704,7 +933,9 @@ namespace ChartPulseOverlayAgent
             if (req.HttpMethod == "POST" && path == "/overlay/session")
             {
                 string sessionId = ExtractJsonString(bodyText, "sessionId");
-                _overlayForm.StartSession(sessionId);
+                string displaySurface = ExtractJsonString(bodyText, "displaySurface");
+                _overlayForm.StartSession(sessionId, displaySurface);
+                WriteDiagnosticLog(string.Format("SESSION id={0} surface={1}", sessionId, string.IsNullOrEmpty(displaySurface) ? "window" : displaySurface));
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }
@@ -713,6 +944,7 @@ namespace ChartPulseOverlayAgent
             {
                 // Clears signals and tracking line immediately while keeping the background daemon alive
                 _overlayForm.ClearOverlay();
+                WriteDiagnosticLog("CLEAR");
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }
@@ -748,6 +980,11 @@ namespace ChartPulseOverlayAgent
                 }
 
                 _overlayForm.UpdatePriceLine(sessionId, true, priceY, relPriceY, hasBounds, bx, by, bw, bh);
+                _priceLogTick++;
+                if (_priceLogTick == 1 || _priceLogTick % 20 == 0)
+                {
+                    WriteDiagnosticLog(string.Format("PRICE_LINE y={0:0.000} relY={1:0.000} hasBounds={2}", priceY, relPriceY, hasBounds));
+                }
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }
@@ -799,6 +1036,11 @@ namespace ChartPulseOverlayAgent
                     bw,
                     bh
                 );
+                _candleLogTick++;
+                if (_candleLogTick == 1 || _candleLogTick % 20 == 0)
+                {
+                    WriteDiagnosticLog(string.Format("LIVE_CANDLE x={0:0.000} y={1:0.000} dir={2} hasBounds={3}", liveX, liveY, dir, hasBounds));
+                }
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }
@@ -844,6 +1086,39 @@ namespace ChartPulseOverlayAgent
                     bh,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 18000
                 );
+                WriteDiagnosticLog(string.Format("SIGNAL dir={0} x={1:0.000} y={2:0.000}", direction, candleX, candleY));
+                WriteJson(res, 200, "{\"ok\":true}");
+                return;
+            }
+
+            if (req.HttpMethod == "POST" && path == "/overlay/status")
+            {
+                string sessionId = ExtractJsonString(bodyText, "sessionId");
+                string statusObj = ExtractJsonObject(bodyText, "operationalStatus");
+                string statusSource = string.IsNullOrEmpty(statusObj) ? bodyText : statusObj;
+                string boundsObj = ExtractJsonObject(statusSource, "chartBounds");
+                string statusShallow = string.IsNullOrEmpty(boundsObj)
+                    ? statusSource
+                    : statusSource.Replace(boundsObj, "{}");
+
+                string statusVal = ExtractJsonString(statusShallow, "status");
+                bool hasBounds = false;
+                double bx = 0, by = 0, bw = 1, bh = 1;
+                if (!string.IsNullOrEmpty(boundsObj))
+                {
+                    bx = ExtractJsonDouble(boundsObj, "x", 0);
+                    by = ExtractJsonDouble(boundsObj, "y", 0);
+                    bw = ExtractJsonDouble(boundsObj, "width", 1);
+                    bh = ExtractJsonDouble(boundsObj, "height", 1);
+                    hasBounds = bw > 0.05 && bh > 0.05;
+                }
+
+                _overlayForm.UpdateOperationalStatus(sessionId, statusVal, hasBounds, bx, by, bw, bh);
+                _statusLogTick++;
+                if (_statusLogTick == 1 || _statusLogTick % 20 == 0 || statusVal == "COMPRA" || statusVal == "VENDA")
+                {
+                    WriteDiagnosticLog(string.Format("OP_STATUS status={0} hasBounds={1}", statusVal, hasBounds));
+                }
                 WriteJson(res, 200, "{\"ok\":true}");
                 return;
             }
@@ -911,6 +1186,39 @@ namespace ChartPulseOverlayAgent
                 return val;
             }
             return fallback;
+        }
+
+        private static readonly object _logLock = new object();
+        private static long _priceLogTick;
+        private static long _candleLogTick;
+        private static long _statusLogTick;
+        private static void WriteDiagnosticLog(string message)
+        {
+            try
+            {
+                string dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "ChartPulseAI"
+                );
+                Directory.CreateDirectory(dir);
+                string logPath = Path.Combine(dir, "overlay-debug.log");
+                lock (_logLock)
+                {
+                    if (File.Exists(logPath) && new FileInfo(logPath).Length > 65536)
+                    {
+                        File.WriteAllText(logPath, string.Empty, Encoding.UTF8);
+                    }
+                    File.AppendAllText(
+                        logPath,
+                        DateTime.UtcNow.ToString("o") + " " + message + Environment.NewLine,
+                        Encoding.UTF8
+                    );
+                }
+            }
+            catch
+            {
+                // Ignore log I/O failures cleanly
+            }
         }
     }
 }

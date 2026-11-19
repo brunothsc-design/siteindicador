@@ -1,4 +1,9 @@
-import type { LiveCandleTracker, PriceLine, VisualSignal } from '../types/signals.ts';
+import type {
+  LiveCandleTracker,
+  OperationalStatusState,
+  PriceLine,
+  VisualSignal,
+} from '../types/signals.ts';
 
 export interface VideoDisplayRect {
   left: number;
@@ -12,6 +17,7 @@ interface SignalOverlayProps {
   signal: VisualSignal | null;
   priceLine?: PriceLine | null;
   liveCandle?: LiveCandleTracker | null;
+  operationalStatus?: OperationalStatusState | null;
   rect: VideoDisplayRect | null;
 }
 
@@ -20,11 +26,12 @@ export function SignalOverlay({
   signal,
   priceLine = null,
   liveCandle = null,
+  operationalStatus = null,
   rect,
 }: SignalOverlayProps) {
   if (
     !active ||
-    (!signal && !priceLine && !liveCandle) ||
+    (!signal && !priceLine && !liveCandle && !operationalStatus) ||
     !rect ||
     rect.width <= 0 ||
     rect.height <= 0
@@ -60,6 +67,16 @@ export function SignalOverlay({
         ? '#F43F5E'
         : '#FBBF24';
 
+  const statusBounds = operationalStatus?.chartBounds ?? lineBounds ?? candleBounds ?? signal?.chartBounds ?? null;
+  const statusLeft = statusBounds ? Math.min(0.82, Math.max(0.02, statusBounds.x + 0.015)) : 0.06;
+  const statusTop = statusBounds ? Math.min(0.85, Math.max(0.03, statusBounds.y + 0.02)) : 0.06;
+  const statusColor =
+    operationalStatus?.status === 'COMPRA'
+      ? '#22C55E'
+      : operationalStatus?.status === 'VENDA'
+        ? '#EF4444'
+        : '#FBBF24';
+
   const isBuy = signal?.direction === 'COMPRA';
   const posX = signal
     ? signal.chartBounds
@@ -83,6 +100,22 @@ export function SignalOverlay({
         height: `${rect.height}px`,
       }}
     >
+      {operationalStatus && (
+        <div
+          className="absolute font-mono font-bold tracking-wider text-xs sm:text-sm px-2 py-0.5 rounded transition-colors duration-150"
+          style={{
+            left: `${statusLeft * 100}%`,
+            top: `${statusTop * 100}%`,
+            color: statusColor,
+            backgroundColor: 'rgba(11, 14, 17, 0.72)',
+            border: `1px solid ${statusColor}`,
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.85)',
+          }}
+        >
+          {operationalStatus.status}
+        </div>
+      )}
+
       {priceLine && (
         <div
           className="absolute h-[2px] transition-[top] duration-150 ease-out"

@@ -20,6 +20,12 @@ import {
   executeGeminiFrameAnalysis,
 } from '../server/analyzeFrameCore.ts';
 import { isTrustedOverlayOrigin } from '../src/engine/localOverlayBridge.ts';
+import {
+  MANDATORY_TIMEFRAME,
+  createInitialOperationalStatus,
+  operationalStatusChanged,
+  resolveOperationalStatus,
+} from '../src/engine/operationalStatus.ts';
 import netlifyAnalyzeHandler from '../netlify/functions/analyze-frame.ts';
 import netlifyHealthHandler from '../netlify/functions/health.ts';
 import netlifyOverlaySessionHandler from '../netlify/functions/overlay-session.ts';
@@ -27,6 +33,7 @@ import netlifyOverlayClearHandler from '../netlify/functions/overlay-clear.ts';
 import netlifyOverlayStateHandler from '../netlify/functions/overlay-state.ts';
 import netlifyOverlayPriceHandler from '../netlify/functions/overlay-price.ts';
 import netlifyOverlayCandleHandler from '../netlify/functions/overlay-candle.ts';
+import netlifyOverlayStatusHandler from '../netlify/functions/overlay-status.ts';
 
 function createSeededRng(seed: number): () => number {
   let s = seed >>> 0;
@@ -1057,8 +1064,316 @@ describe('ChartPulse AI — Additional Live Forming Candle Tracking', () => {
     assert.match(cs, /UpdateLiveCandle/);
     assert.match(cs, /HasLiveCandle/);
     assert.match(cs, /liveCandleSupported/);
-    assert.match(cs, /\\"version\\":\\"1\.2\.0\\"/);
+    assert.match(cs, /\\"version\\":\\"1\.(?:2|3)\.0\\"/);
     assert.match(cs, /"\/overlay\/price"/);
     assert.match(cs, /"\/overlay\/signal"/);
   });
 });
+
+describe('ChartPulse AI — M1 Timeframe (1 Minute) End-to-End Detection & Windows Overlay Audit', () => {
+  it('detects narrow zoomed-out M1 candles with tight vertical range and dashed horizontal price line', () => {
+    const width = 1280;
+    const height = 720;
+    const bg: [number, number, number] = [19, 23, 34];
+    const bull: [number, number, number] = [14, 203, 129];
+    const bear: [number, number, number] = [246, 70, 93];
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+        for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+          const idx = (y * width + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+
+    // 55 narrow 3px-wide M1 candles in a tight 8% vertical consolidation band
+    const basePy = Math.round(height * 0.44);
+    const livePricePy = Math.round(height * 0.41);
+    let lastCandleX = 0;
+    for (let i = 0; i < 55; i++) {
+      const cx = Math.round(width * 0.08) + i * 11;
+      lastCandleX = cx;
+      const isLast = i === 54;
+      const isBull = i % 2 === 0;
+      const color = isBull ? bull : bear;
+      const top = isLast ? livePricePy : basePy + ((i * 5) % 24);
+      const bot = isLast ? livePricePy + 18 : top + 12 + (i % 8);
+      paint(cx + 1, top - 4, cx + 1, bot + 4, color); // 1px wick
+      paint(cx, top, cx + 2, bot, color); // 3px wide M1 body
+    }
+
+    // Right-side solid Buy/Sell broker buttons (must be excluded from chartBounds)
+    paint(Math.round(width * 0.87), Math.round(height * 0.35), Math.round(width * 0.96), Math.round(height * 0.45), bull);
+    paint(Math.round(width * 0.87), Math.round(height * 0.50), Math.round(width * 0.96), Math.round(height * 0.60), bear);
+
+    // Dashed M1 horizontal price line (4px on, 4px off -> ~50% dashed coverage) + right axis pill
+    for (let x = lastCandleX + 2; x <= Math.round(width * 0.81); x++) {
+      if (Math.floor(x / 4) % 2 === 0) {
+        paint(x, livePricePy, x, livePricePy + 1, [56, 189, 248]);
+      }
+    }
+    paint(Math.round(width * 0.815), livePricePy - 7, Math.round(width * 0.855), livePricePy + 7, [56, 189, 248]);
+
+    const digest = processFrameLocally(rgba, width, height, null);
+    assert.equal(digest.chartDetected, true, 'Must detect M1 chart with narrow 3px candles');
+    assert.ok(digest.chartBounds !== null);
+    assert.ok(digest.chartBounds.x + digest.chartBounds.width < 0.86, 'Must not leak into Buy/Sell panel');
+    assert.ok(digest.priceLine !== null, 'Must detect dashed M1 price line');
+    assert.equal(digest.priceLine.source, 'PRICE_LINE');
+    assert.ok(Math.abs(digest.priceLine.y - 0.41) <= 0.015);
+
+    const liveCandle = detectLiveMovingCandle(rgba, width, height, digest.chartBounds, digest.priceLine);
+    assert.ok(liveCandle !== null, 'Must locate forming M1 candle');
+    assert.equal(liveCandle.direction, 'BULL');
+    assert.ok(Math.abs(liveCandle.y - 0.41) <= 0.015);
+    assert.ok(Math.abs(liveCandle.x - lastCandleX / width) <= 0.015);
+  });
+
+  it('tracks zoomed-in wickless Marubozu M1 candle and newly opened 2px M1 candle cleanly', () => {
+    const width = 640;
+    const height = 360;
+    const bg: [number, number, number] = [28, 32, 48];
+    const bull: [number, number, number] = [34, 197, 94];
+    const bear: [number, number, number] = [239, 68, 68];
+
+    const makeFrame = (lastHeightPx: number, lastWidthPx: number) => {
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        rgba[i * 4] = bg[0];
+        rgba[i * 4 + 1] = bg[1];
+        rgba[i * 4 + 2] = bg[2];
+        rgba[i * 4 + 3] = 255;
+      }
+      const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+        for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+          for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+            const idx = (y * width + x) * 4;
+            rgba[idx] = c[0];
+            rgba[idx + 1] = c[1];
+            rgba[idx + 2] = c[2];
+          }
+        }
+      };
+
+      // Draw 8 zoomed-in M1 candles, ending with a wickless Marubozu or newly-opened 2px M1 candle
+      for (let i = 0; i < 8; i++) {
+        const x0 = 70 + i * 48;
+        const isLast = i === 7;
+        const c = i % 2 === 0 ? bear : bull;
+        if (isLast) {
+          paint(x0, 150, x0 + lastWidthPx - 1, 150 + lastHeightPx - 1, bull);
+        } else {
+          paint(x0 + 5, 110 + i * 5, x0 + 5, 190 + i * 4, c);
+          paint(x0, 125 + i * 5, x0 + 10, 175 + i * 4, c);
+        }
+      }
+      return rgba;
+    };
+
+    // Case 1: Zoomed-in 14px-wide x 36px-tall wickless M1 candle (must NOT be rejected as pill)
+    const marubozuRgba = makeFrame(36, 14);
+    const dMaru = processFrameLocally(marubozuRgba, width, height, null);
+    assert.equal(dMaru.chartDetected, true);
+    assert.ok(dMaru.priceLine !== null, 'Wickless M1 candle must yield CANDLE_CLOSE priceLine');
+    const cMaru = detectLiveMovingCandle(marubozuRgba, width, height, dMaru.chartBounds, dMaru.priceLine);
+    assert.ok(cMaru !== null, 'Must track wickless M1 Marubozu candle');
+    assert.equal(cMaru.direction, 'BULL');
+    assert.ok(Math.abs(cMaru.x - (70 + 7 * 48 + 6.5) / width) <= 0.02);
+
+    // Case 2: Newly-opened 2px-tall colored M1 candle (start of the 1-minute candle)
+    const tinyOpenRgba = makeFrame(2, 8);
+    const dTiny = processFrameLocally(tinyOpenRgba, width, height, null);
+    assert.equal(dTiny.chartDetected, true);
+    const cTiny = detectLiveMovingCandle(tinyOpenRgba, width, height, dTiny.chartBounds, dTiny.priceLine);
+    assert.ok(cTiny !== null, 'Must track newly opened 2px M1 candle');
+    assert.equal(cTiny.direction, 'BULL');
+    assert.ok(Math.abs(cTiny.y - 150 / height) <= 0.015);
+  });
+
+  it('verifies Windows overlay Win32 DPI awareness, Z-order, monitor surface mapping, and diagnostics', () => {
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /SetProcessDPIAware/);
+    assert.match(cs, /CreateParams/);
+    assert.match(cs, /ShowWithoutActivation/);
+    assert.match(cs, /HWND_TOPMOST/);
+    assert.match(cs, /SetWindowPos/);
+    assert.match(cs, /DisplaySurface == "monitor"/);
+    assert.match(cs, /BuildDiagnosticsJson/);
+    assert.match(cs, /overlay-debug\.log/);
+  });
+});
+
+describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDANDO / COMPRA / VENDA)', () => {
+  it('transitions smoothly across AGUARDANDO -> COMPRA -> AGUARDANDO -> VENDA -> AGUARDANDO on M1 without flicker', () => {
+    assert.equal(MANDATORY_TIMEFRAME, 'M1');
+    const bounds = { x: 0.06, y: 0.1, width: 0.76, height: 0.74 };
+    const t0 = 1_700_000_000_000;
+
+    // 1. Initial active state must start on AGUARDANDO in M1 even with no signal yet
+    const initial = createInitialOperationalStatus(bounds, t0);
+    assert.equal(initial.status, 'AGUARDANDO');
+    assert.equal(initial.timeframe, 'M1');
+    assert.equal(initial.confidence, 0);
+
+    // 2. Momentary/weak candidate (< 90%) stays AGUARDANDO
+    const filteredWeak = applySignalPrecisionFilter({
+      chartDetected: true,
+      rawSignal: 'COMPRA',
+      confidence: 84,
+      rawRegime: 'TRENDING_UP',
+    });
+    assert.equal(filteredWeak.signal, 'NONE');
+    const stillWaiting = resolveOperationalStatus({
+      isActive: true,
+      current: initial,
+      activeSignal: null,
+      latestBounds: bounds,
+      now: t0 + 1000,
+    });
+    assert.ok(stillWaiting !== null);
+    assert.equal(stillWaiting.status, 'AGUARDANDO');
+    assert.equal(operationalStatusChanged(initial, stillWaiting), false);
+
+    // 3. Confirmed M1 COMPRA (>= 90%) switches status to COMPRA
+    const buySig = {
+      id: 'sig-buy-1',
+      direction: 'COMPRA' as const,
+      candleX: 0.71,
+      candleY: 0.44,
+      chartRelativeX: 0.85,
+      chartRelativeY: 0.46,
+      chartBounds: bounds,
+      confidence: 94,
+      candleId: 'm1-right-buy',
+      marketRegime: 'TRENDING_UP' as const,
+      createdAt: t0 + 2000,
+      expiresAt: t0 + 20000,
+    };
+    const buyState = resolveOperationalStatus({
+      isActive: true,
+      current: stillWaiting,
+      activeSignal: buySig,
+      latestBounds: bounds,
+      now: t0 + 2500,
+    });
+    assert.ok(buyState !== null);
+    assert.equal(buyState.status, 'COMPRA');
+    assert.equal(buyState.timeframe, 'M1');
+    assert.equal(buyState.confidence, 94);
+    assert.equal(operationalStatusChanged(stillWaiting, buyState), true);
+
+    // 4. Signal expiration reverts smoothly back to AGUARDANDO (never null while active)
+    const afterBuyExpire = resolveOperationalStatus({
+      isActive: true,
+      current: buyState,
+      activeSignal: buySig,
+      latestBounds: null,
+      now: t0 + 21000,
+    });
+    assert.ok(afterBuyExpire !== null);
+    assert.equal(afterBuyExpire.status, 'AGUARDANDO');
+    assert.deepEqual(afterBuyExpire.chartBounds, bounds, 'Preserves chartBounds without flicker between captures');
+
+    // 5. Confirmed M1 VENDA (>= 90%) switches status to VENDA and reverts to AGUARDANDO after expiry
+    const sellSig = {
+      id: 'sig-sell-1',
+      direction: 'VENDA' as const,
+      candleX: 0.72,
+      candleY: 0.56,
+      chartRelativeX: 0.87,
+      chartRelativeY: 0.62,
+      chartBounds: bounds,
+      confidence: 92,
+      candleId: 'm1-right-sell',
+      marketRegime: 'TRENDING_DOWN' as const,
+      createdAt: t0 + 25000,
+      expiresAt: t0 + 43000,
+    };
+    const sellState = resolveOperationalStatus({
+      isActive: true,
+      current: afterBuyExpire,
+      activeSignal: sellSig,
+      latestBounds: bounds,
+      now: t0 + 26000,
+    });
+    assert.ok(sellState !== null);
+    assert.equal(sellState.status, 'VENDA');
+    assert.equal(sellState.confidence, 92);
+
+    const afterSellExpire = resolveOperationalStatus({
+      isActive: true,
+      current: sellState,
+      activeSignal: null,
+      latestBounds: bounds,
+      now: t0 + 44000,
+    });
+    assert.ok(afterSellExpire !== null);
+    assert.equal(afterSellExpire.status, 'AGUARDANDO');
+
+    // 6. Deactivating clears operational status cleanly
+    const deactivated = resolveOperationalStatus({
+      isActive: false,
+      current: afterSellExpire,
+      activeSignal: null,
+      latestBounds: bounds,
+      now: t0 + 45000,
+    });
+    assert.equal(deactivated, null);
+  });
+
+  it('enforces M1 prompt rules without 30s logic and preserves 90% confidence + Netlify/Windows status endpoints', async () => {
+    assert.equal(MIN_SIGNAL_CONFIDENCE, 90);
+    const analyzeCoreSrc = fs.readFileSync(path.resolve('server/analyzeFrameCore.ts'), 'utf8');
+    assert.match(analyzeCoreSrc, /1 MINUTO \(M1\)/);
+    assert.doesNotMatch(analyzeCoreSrc, /30\s*segundos|timeframe\s*30s|M30s/i);
+
+    const stateRes = await netlifyOverlayStateHandler();
+    assert.equal(stateRes.status, 200);
+    const stateJson = (await stateRes.json()) as { operationalStatus?: unknown };
+    assert.equal(stateJson.operationalStatus, null);
+
+    const statusReq = new Request('https://example.netlify.app/api/overlay/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-m1-status',
+        operationalStatus: { status: 'AGUARDANDO', timeframe: 'M1', confidence: 0 },
+      }),
+    });
+    const statusRes = await netlifyOverlayStatusHandler(statusReq);
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as { ok: boolean; status: string; timeframe: string };
+    assert.equal(statusBody.ok, true);
+    assert.equal(statusBody.status, 'AGUARDANDO');
+    assert.equal(statusBody.timeframe, 'M1');
+
+    const toml = fs.readFileSync(path.resolve('netlify.toml'), 'utf8');
+    assert.match(toml, /from\s*=\s*"\/api\/overlay\/status"/);
+    const redirects = fs.readFileSync(path.resolve('public/_redirects'), 'utf8');
+    assert.match(redirects, /\/api\/overlay\/status\s+\/\.netlify\/functions\/overlay-status\s+200!/);
+
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /\\"version\\":\\"1\.3\.0\\"/);
+    assert.match(cs, /operationalStatusSupported/);
+    assert.match(cs, /"\/overlay\/status"/);
+    assert.match(cs, /UpdateOperationalStatus/);
+    assert.match(cs, /AGUARDANDO/);
+  });
+});
+

@@ -9,15 +9,23 @@ import {
   pushLocalOverlayCandle,
   pushLocalOverlayPrice,
   pushLocalOverlaySignal,
+  pushLocalOverlayStatus,
   type OverlayConnectionState,
 } from './engine/localOverlayBridge.ts';
+import {
+  createInitialOperationalStatus,
+  operationalStatusChanged,
+  resolveOperationalStatus,
+} from './engine/operationalStatus.ts';
 import {
   checkDisplayCaptureEnvironment,
   classifyDisplayCaptureError,
 } from './engine/screenCaptureGuard.ts';
 import type {
   AnalyzeFrameResponse,
+  ChartBounds,
   LiveCandleTracker,
+  OperationalStatusState,
   PriceLine,
   VisualSignal,
 } from './types/signals.ts';
@@ -84,6 +92,7 @@ export default function App() {
   const [activeSignal, setActiveSignal] = useState<VisualSignal | null>(null);
   const [priceLine, setPriceLine] = useState<PriceLine | null>(null);
   const [liveCandle, setLiveCandle] = useState<LiveCandleTracker | null>(null);
+  const [operationalStatus, setOperationalStatus] = useState<OperationalStatusState | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [videoRect, setVideoRect] = useState<VideoDisplayRect | null>(null);
   const [overlayStatus, setOverlayStatus] = useState<OverlayConnectionState>('checking');
@@ -108,6 +117,11 @@ export default function App() {
   const lastPricePushAtRef = useRef(0);
   const lastLiveCandleRef = useRef<LiveCandleTracker | null>(null);
   const lastLiveCandlePushAtRef = useRef(0);
+  const lastOperationalStatusRef = useRef<OperationalStatusState | null>(null);
+  const lastStatusPushAtRef = useRef(0);
+  const lastChartBoundsRef = useRef<ChartBounds | null>(null);
+  const lastDiagStateRef = useRef<string>('');
+  const localAgentReadyRef = useRef(false);
 
   const syncVideoRect = useCallback(() => {
     const video = videoRef.current;
@@ -151,6 +165,11 @@ export default function App() {
     lastPricePushAtRef.current = 0;
     lastLiveCandleRef.current = null;
     lastLiveCandlePushAtRef.current = 0;
+    lastOperationalStatusRef.current = null;
+    lastStatusPushAtRef.current = 0;
+    lastChartBoundsRef.current = null;
+    lastDiagStateRef.current = '';
+    localAgentReadyRef.current = false;
     cooldownUntilRef.current = 0;
 
     if (timerRef.current !== null) {
@@ -184,6 +203,7 @@ export default function App() {
     setActiveSignal(null);
     setPriceLine(null);
     setLiveCandle(null);
+    setOperationalStatus(null);
     setVideoRect(null);
 
     if (closingSession) {
@@ -197,6 +217,55 @@ export default function App() {
       });
     }
   }, []);
+
+  const syncOperationalStatusState = useCallback(
+    (latestBounds: ChartBounds | null, forcePush = false) => {
+      if (!isActiveRef.current || !sessionIdRef.current) return;
+      const now = Date.now();
+      if (latestBounds) {
+        lastChartBoundsRef.current = latestBounds;
+      }
+
+      if (lastSignalRef.current && now > lastSignalRef.current.expiresAt) {
+        lastSignalRef.current = null;
+        setActiveSignal(null);
+      }
+
+      const nextStatus = resolveOperationalStatus({
+        isActive: isActiveRef.current,
+        current: lastOperationalStatusRef.current,
+        activeSignal: lastSignalRef.current,
+        latestBounds: latestBounds ?? lastChartBoundsRef.current,
+        now,
+      });
+
+      if (!nextStatus) return;
+
+      const changed = operationalStatusChanged(lastOperationalStatusRef.current, nextStatus);
+      const heartbeatDue = now - lastStatusPushAtRef.current >= 1500;
+
+      if (forcePush || changed || heartbeatDue) {
+        lastOperationalStatusRef.current = nextStatus;
+        lastStatusPushAtRef.current = now;
+        if (changed || forcePush) {
+          setOperationalStatus(nextStatus);
+        }
+
+        const activeSession = sessionIdRef.current;
+        if (activeSession) {
+          void pushLocalOverlayStatus(activeSession, nextStatus);
+          void fetch('/api/overlay/status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: activeSession, operationalStatus: nextStatus }),
+          }).catch(() => {
+            // Non-fatal if backend overlay stream is not attached
+          });
+        }
+      }
+    },
+    []
+  );
 
   const trackCurrentPrice = useCallback(() => {
     if (!isActiveRef.current || !sessionIdRef.current) return;
@@ -282,7 +351,32 @@ export default function App() {
         });
       }
     }
-  }, []);
+
+    if (local.chartDetected && local.chartBounds) {
+      lastChartBoundsRef.current = local.chartBounds;
+    }
+
+    // Keep permanent operational status synced without flickering between captures
+    syncOperationalStatusState(local.chartBounds ?? lastChartBoundsRef.current);
+
+    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}`;
+    if (diagKey !== lastDiagStateRef.current) {
+      lastDiagStateRef.current = diagKey;
+      console.info('[ChartPulse:Diag]', {
+        frame: `${targetW}x${targetH}`,
+        chartDetected: local.chartDetected,
+        chartBounds: local.chartBounds,
+        operationalStatus: lastOperationalStatusRef.current?.status ?? null,
+        priceLine: nextPrice
+          ? { y: nextPrice.y, source: nextPrice.source, conf: nextPrice.confidence }
+          : null,
+        liveCandle: nextCandle
+          ? { x: nextCandle.x, y: nextCandle.y, dir: nextCandle.direction, conf: nextCandle.confidence }
+          : null,
+        localAgentConnected: localAgentReadyRef.current,
+      });
+    }
+  }, [syncOperationalStatusState]);
 
   const analyzeCurrentFrame = useCallback(async () => {
     if (!isActiveRef.current || !sessionIdRef.current) return;
@@ -413,7 +507,21 @@ export default function App() {
           };
           lastSignalRef.current = nextSignal;
           setActiveSignal(nextSignal);
+          syncOperationalStatusState(nextSignal.chartBounds, true);
           void pushLocalOverlaySignal(sessionAtSend, nextSignal);
+        }
+      } else if (lastSignalRef.current) {
+        const prev = lastSignalRef.current;
+        const expired = Date.now() > prev.expiresAt;
+        const shiftedToNewCycle =
+          Date.now() - prev.createdAt >= 10000 &&
+          Math.abs(result.candleX - prev.candleX) >= 0.045 &&
+          result.candleId !== '' &&
+          result.candleId !== prev.candleId;
+        if (expired || shiftedToNewCycle) {
+          lastSignalRef.current = null;
+          setActiveSignal(null);
+          syncOperationalStatusState(result.chartBounds ?? local.chartBounds, true);
         }
       }
     } catch (err) {
@@ -429,7 +537,7 @@ export default function App() {
         abortRef.current = null;
       }
     }
-  }, []);
+  }, [syncOperationalStatusState]);
 
   const activate = useCallback(async () => {
     if (isRequestingCaptureRef.current || isActiveRef.current) {
@@ -487,22 +595,89 @@ export default function App() {
         deactivate();
       };
 
+      const initialOpStatus = createInitialOperationalStatus(null, Date.now());
+      lastOperationalStatusRef.current = initialOpStatus;
+      lastStatusPushAtRef.current = Date.now();
+      lastChartBoundsRef.current = null;
+
       setIsActive(true);
       setActiveSignal(null);
       setPriceLine(null);
       setLiveCandle(null);
+      setOperationalStatus(initialOpStatus);
 
-      void notifyLocalOverlaySession(newSessionId).then((connected) => {
+      const trackSettings =
+        typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : {};
+      const displaySurface =
+        typeof (trackSettings as { displaySurface?: unknown }).displaySurface === 'string'
+          ? String((trackSettings as { displaySurface?: string }).displaySurface)
+          : 'window';
+
+      console.info('[ChartPulse:Diag] Captura iniciada (Timeframe M1)', {
+        sessionId: newSessionId,
+        displaySurface,
+        width: trackSettings.width,
+        height: trackSettings.height,
+        initialStatus: initialOpStatus.status,
+      });
+
+      void notifyLocalOverlaySession(newSessionId, displaySurface).then((connected) => {
+        localAgentReadyRef.current = connected;
         setOverlayStatus(connected ? 'connected' : 'disconnected');
+        if (connected && isActiveRef.current && sessionIdRef.current === newSessionId) {
+          if (lastOperationalStatusRef.current) {
+            void pushLocalOverlayStatus(newSessionId, lastOperationalStatusRef.current);
+          }
+          if (lastPriceLineRef.current) {
+            void pushLocalOverlayPrice(newSessionId, lastPriceLineRef.current);
+          }
+          if (lastLiveCandleRef.current) {
+            void pushLocalOverlayCandle(newSessionId, lastLiveCandleRef.current);
+          }
+        }
       });
 
       void fetch('/api/overlay/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: newSessionId }),
-      }).catch(() => {
-        // Non-fatal if SSE bridge isn't attached
-      });
+        body: JSON.stringify({ sessionId: newSessionId, displaySurface }),
+      })
+        .then(() => {
+          if (!isActiveRef.current || sessionIdRef.current !== newSessionId) return;
+          if (lastOperationalStatusRef.current) {
+            void fetch('/api/overlay/status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sessionId: newSessionId,
+                operationalStatus: lastOperationalStatusRef.current,
+              }),
+            }).catch(() => {});
+          }
+          if (lastPriceLineRef.current) {
+            void fetch('/api/overlay/price', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sessionId: newSessionId,
+                priceLine: lastPriceLineRef.current,
+              }),
+            }).catch(() => {});
+          }
+          if (lastLiveCandleRef.current) {
+            void fetch('/api/overlay/candle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sessionId: newSessionId,
+                liveCandle: lastLiveCandleRef.current,
+              }),
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {
+          // Non-fatal if SSE bridge isn't attached
+        });
 
       // Wait a tick for the <video> element to mount and attach stream
       window.setTimeout(() => {
@@ -549,9 +724,22 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const probeOverlay = async () => {
-      const ok = await checkLocalOverlayHealth();
+      const health = await checkLocalOverlayHealth();
+      const ok = Boolean(health?.ok);
+      localAgentReadyRef.current = ok;
       if (!cancelled) {
         setOverlayStatus(ok ? 'connected' : 'disconnected');
+      }
+      if (ok && health) {
+        console.info('[ChartPulse:Diag] Agente Windows', {
+          version: health.version,
+          priceLineSupported: health.priceLineSupported,
+          liveCandleSupported: health.liveCandleSupported,
+          targetBounds: health.targetBounds,
+          priceLineUpdates: health.priceLineUpdates,
+          liveCandleUpdates: health.liveCandleUpdates,
+          paintCount: health.paintCount,
+        });
       }
     };
 
@@ -584,6 +772,7 @@ export default function App() {
             muted
             playsInline
             onLoadedMetadata={syncVideoRect}
+            onResize={syncVideoRect}
             className="h-full w-full object-contain pointer-events-none select-none"
           />
 
@@ -592,6 +781,7 @@ export default function App() {
             signal={activeSignal}
             priceLine={priceLine}
             liveCandle={liveCandle}
+            operationalStatus={operationalStatus}
             rect={videoRect}
           />
 

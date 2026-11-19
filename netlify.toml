@@ -87,6 +87,18 @@
   force = true
 
 [[redirects]]
+  from = "/api/overlay/status"
+  to = "/.netlify/functions/overlay-status"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-status"
+  to = "/.netlify/functions/overlay-status"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
