@@ -6,4 +6,6 @@
 /api/overlay-session /.netlify/functions/overlay-session 200!
 /api/overlay-clear /.netlify/functions/overlay-clear 200!
 /api/overlay-state /.netlify/functions/overlay-state 200!
+/api/overlay/price /.netlify/functions/overlay-price 200!
+/api/overlay-price /.netlify/functions/overlay-price 200!
 /* /index.html 200

@@ -1,4 +1,4 @@
-import type { VisualSignal } from '../types/signals.ts';
+import type { PriceLine, VisualSignal } from '../types/signals.ts';
 
 export interface VideoDisplayRect {
   left: number;
@@ -10,21 +10,36 @@ export interface VideoDisplayRect {
 interface SignalOverlayProps {
   active: boolean;
   signal: VisualSignal | null;
+  priceLine?: PriceLine | null;
   rect: VideoDisplayRect | null;
 }
 
-export function SignalOverlay({ active, signal, rect }: SignalOverlayProps) {
-  if (!active || !signal || !rect || rect.width <= 0 || rect.height <= 0) {
+export function SignalOverlay({ active, signal, priceLine = null, rect }: SignalOverlayProps) {
+  if (!active || (!signal && !priceLine) || !rect || rect.width <= 0 || rect.height <= 0) {
     return null;
   }
 
-  const isBuy = signal.direction === 'COMPRA';
-  const posX = signal.chartBounds
-    ? signal.chartBounds.x + signal.chartRelativeX * signal.chartBounds.width
-    : signal.candleX;
-  const posY = signal.chartBounds
-    ? signal.chartBounds.y + signal.chartRelativeY * signal.chartBounds.height
-    : signal.candleY;
+  const lineBounds = priceLine?.chartBounds ?? null;
+  const lineLeft = lineBounds ? lineBounds.x : 0.04;
+  const lineWidth = lineBounds ? lineBounds.width : 0.88;
+  const lineTop =
+    priceLine && lineBounds
+      ? lineBounds.y + priceLine.chartRelativeY * lineBounds.height
+      : priceLine
+        ? priceLine.y
+        : 0;
+
+  const isBuy = signal?.direction === 'COMPRA';
+  const posX = signal
+    ? signal.chartBounds
+      ? signal.chartBounds.x + signal.chartRelativeX * signal.chartBounds.width
+      : signal.candleX
+    : 0;
+  const posY = signal
+    ? signal.chartBounds
+      ? signal.chartBounds.y + signal.chartRelativeY * signal.chartBounds.height
+      : signal.candleY
+    : 0;
 
   return (
     <div
@@ -37,18 +52,34 @@ export function SignalOverlay({ active, signal, rect }: SignalOverlayProps) {
         height: `${rect.height}px`,
       }}
     >
-      <div
-        className="absolute -translate-x-1/2 -translate-y-1/2 font-mono font-bold tracking-wider text-sm sm:text-base transition-opacity duration-150"
-        style={{
-          left: `${posX * 100}%`,
-          top: `${posY * 100}%`,
-          color: isBuy ? '#22C55E' : '#EF4444',
-          textShadow:
-            '0 1px 2px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,1)',
-        }}
-      >
-        {signal.direction}
-      </div>
+      {priceLine && (
+        <div
+          className="absolute h-[2px] transition-[top] duration-150 ease-out"
+          style={{
+            left: `${lineLeft * 100}%`,
+            width: `${lineWidth * 100}%`,
+            top: `${lineTop * 100}%`,
+            transform: 'translateY(-50%)',
+            backgroundColor: '#38BDF8',
+            boxShadow: '0 0 4px rgba(0, 0, 0, 0.9), 0 1px 1px rgba(0, 0, 0, 0.95)',
+          }}
+        />
+      )}
+
+      {signal && (
+        <div
+          className="absolute -translate-x-1/2 -translate-y-1/2 font-mono font-bold tracking-wider text-sm sm:text-base transition-opacity duration-150"
+          style={{
+            left: `${posX * 100}%`,
+            top: `${posY * 100}%`,
+            color: isBuy ? '#22C55E' : '#EF4444',
+            textShadow:
+              '0 1px 2px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,1)',
+          }}
+        >
+          {signal.direction}
+        </div>
+      )}
     </div>
   );
 }

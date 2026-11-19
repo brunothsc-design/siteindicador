@@ -24,10 +24,20 @@ export interface VisualSignal {
   expiresAt: number;
 }
 
+export interface PriceLine {
+  y: number; // normalized 0..1 relative to captured frame
+  chartRelativeY: number; // normalized 0..1 relative to detected chartBounds
+  chartBounds: ChartBounds | null;
+  confidence: number; // 0..1
+  source: 'PRICE_LINE' | 'CANDLE_CLOSE';
+  updatedAt: number;
+}
+
 export interface OverlayState {
   active: boolean;
   sessionId: string | null;
   signal: VisualSignal | null;
+  priceLine: PriceLine | null;
   chartBounds: ChartBounds | null;
   updatedAt: number;
 }

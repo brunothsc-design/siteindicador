@@ -11,6 +11,7 @@ import {
 import type {
   AnalyzeFrameRequest,
   OverlayState,
+  PriceLine,
   VisualSignal,
 } from './src/types/signals.ts';
 
@@ -25,6 +26,7 @@ const overlayState: OverlayState = {
   active: false,
   sessionId: null,
   signal: null,
+  priceLine: null,
   chartBounds: null,
   updatedAt: Date.now(),
 };
@@ -95,11 +97,31 @@ async function startServer(): Promise<void> {
     overlayState.active = true;
     overlayState.sessionId = sessionId;
     overlayState.signal = null;
+    overlayState.priceLine = null;
     overlayState.chartBounds = null;
     overlayState.updatedAt = Date.now();
     broadcastOverlayState();
 
     res.json({ ok: true, sessionId });
+  });
+
+  app.post('/api/overlay/price', (req: Request, res: Response) => {
+    const body = req.body as { sessionId?: string; priceLine?: PriceLine | null };
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+    if (!sessionId || deactivatedSessions.has(sessionId) || overlayState.sessionId !== sessionId) {
+      res.json({ ok: true, ignored: true });
+      return;
+    }
+
+    const nextPrice = body?.priceLine ?? null;
+    overlayState.priceLine = nextPrice;
+    if (nextPrice?.chartBounds) {
+      overlayState.chartBounds = nextPrice.chartBounds;
+    }
+    overlayState.updatedAt = Date.now();
+    broadcastOverlayState();
+
+    res.json({ ok: true });
   });
 
   app.post('/api/overlay/clear', (req: Request, res: Response) => {
@@ -118,6 +140,7 @@ async function startServer(): Promise<void> {
     overlayState.active = false;
     overlayState.sessionId = null;
     overlayState.signal = null;
+    overlayState.priceLine = null;
     overlayState.chartBounds = null;
     overlayState.updatedAt = Date.now();
     broadcastOverlayState();

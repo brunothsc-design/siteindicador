@@ -1,4 +1,4 @@
-import type { VisualSignal } from '../types/signals.ts';
+import type { PriceLine, VisualSignal } from '../types/signals.ts';
 
 export const LOCAL_OVERLAY_URL = 'http://127.0.0.1:47821';
 
@@ -120,6 +120,25 @@ export async function pushLocalOverlaySignal(
       }),
     },
     1400
+  );
+  return Boolean(res && res.ok);
+}
+
+export async function pushLocalOverlayPrice(
+  sessionId: string,
+  priceLine: PriceLine | null
+): Promise<boolean> {
+  const res = await fetchLocalOverlay(
+    '/overlay/price',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        priceLine,
+      }),
+    },
+    1000
   );
   return Boolean(res && res.ok);
 }

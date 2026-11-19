@@ -63,6 +63,18 @@
   force = true
 
 [[redirects]]
+  from = "/api/overlay/price"
+  to = "/.netlify/functions/overlay-price"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-price"
+  to = "/.netlify/functions/overlay-price"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200

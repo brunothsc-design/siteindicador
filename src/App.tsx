@@ -5,6 +5,7 @@ import {
   checkLocalOverlayHealth,
   clearLocalOverlaySignals,
   notifyLocalOverlaySession,
+  pushLocalOverlayPrice,
   pushLocalOverlaySignal,
   type OverlayConnectionState,
 } from './engine/localOverlayBridge.ts';
@@ -12,16 +13,39 @@ import {
   checkDisplayCaptureEnvironment,
   classifyDisplayCaptureError,
 } from './engine/screenCaptureGuard.ts';
-import type { AnalyzeFrameResponse, VisualSignal } from './types/signals.ts';
+import type { AnalyzeFrameResponse, PriceLine, VisualSignal } from './types/signals.ts';
 
 const CAPTURE_POLL_MS = 2200;
+const PRICE_POLL_MS = 350;
 const MIN_API_INTERVAL_MS = 4500;
 const SIGNAL_TTL_MS = 18000;
 const OVERLAY_HEALTH_POLL_MS = 5000;
 
+function priceLineChanged(prev: PriceLine | null, next: PriceLine | null): boolean {
+  if (prev === null && next === null) return false;
+  if (prev === null || next === null) return true;
+  if (Math.abs(prev.y - next.y) >= 0.0015) return true;
+  if (Math.abs(prev.chartRelativeY - next.chartRelativeY) >= 0.0015) return true;
+  const pb = prev.chartBounds;
+  const nb = next.chartBounds;
+  if ((pb === null) !== (nb === null)) return true;
+  if (pb && nb) {
+    if (
+      Math.abs(pb.x - nb.x) >= 0.005 ||
+      Math.abs(pb.y - nb.y) >= 0.005 ||
+      Math.abs(pb.width - nb.width) >= 0.005 ||
+      Math.abs(pb.height - nb.height) >= 0.005
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export default function App() {
   const [isActive, setIsActive] = useState(false);
   const [activeSignal, setActiveSignal] = useState<VisualSignal | null>(null);
+  const [priceLine, setPriceLine] = useState<PriceLine | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [videoRect, setVideoRect] = useState<VideoDisplayRect | null>(null);
   const [overlayStatus, setOverlayStatus] = useState<OverlayConnectionState>('checking');
@@ -35,12 +59,15 @@ export default function App() {
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
+  const priceTimerRef = useRef<number | null>(null);
   const inFlightRef = useRef(false);
 
   const lastSignatureRef = useRef<Float32Array | null>(null);
   const lastApiCallAtRef = useRef(0);
   const cooldownUntilRef = useRef(0);
   const lastSignalRef = useRef<VisualSignal | null>(null);
+  const lastPriceLineRef = useRef<PriceLine | null>(null);
+  const lastPricePushAtRef = useRef(0);
 
   const syncVideoRect = useCallback(() => {
     const video = videoRef.current;
@@ -80,11 +107,18 @@ export default function App() {
     inFlightRef.current = false;
     lastSignatureRef.current = null;
     lastSignalRef.current = null;
+    lastPriceLineRef.current = null;
+    lastPricePushAtRef.current = 0;
     cooldownUntilRef.current = 0;
 
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+
+    if (priceTimerRef.current !== null) {
+      window.clearInterval(priceTimerRef.current);
+      priceTimerRef.current = null;
     }
 
     if (abortRef.current) {
@@ -106,6 +140,7 @@ export default function App() {
 
     setIsActive(false);
     setActiveSignal(null);
+    setPriceLine(null);
     setVideoRect(null);
 
     if (closingSession) {
@@ -117,6 +152,65 @@ export default function App() {
       }).catch(() => {
         // Ignore network errors during immediate teardown
       });
+    }
+  }, []);
+
+  const trackCurrentPrice = useCallback(() => {
+    if (!isActiveRef.current || !sessionIdRef.current) return;
+
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      return;
+    }
+
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+    }
+    const canvas = canvasRef.current;
+    const targetW = Math.min(1280, video.videoWidth);
+    const targetH = Math.max(1, Math.round((targetW / video.videoWidth) * video.videoHeight));
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, targetW, targetH);
+    const imgData = ctx.getImageData(0, 0, targetW, targetH);
+
+    const local = processFrameLocally(
+      imgData.data,
+      targetW,
+      targetH,
+      lastSignatureRef.current
+    );
+
+    const nextPrice = local.chartDetected ? local.priceLine : null;
+    const changed = priceLineChanged(lastPriceLineRef.current, nextPrice);
+    const now = Date.now();
+    const heartbeatDue = nextPrice !== null && now - lastPricePushAtRef.current >= 1500;
+
+    if (changed || heartbeatDue) {
+      lastPriceLineRef.current = nextPrice;
+      lastPricePushAtRef.current = now;
+      if (changed) {
+        setPriceLine(nextPrice);
+      }
+
+      const activeSession = sessionIdRef.current;
+      if (activeSession) {
+        void pushLocalOverlayPrice(activeSession, nextPrice);
+        void fetch('/api/overlay/price', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: activeSession, priceLine: nextPrice }),
+        }).catch(() => {
+          // Non-fatal if backend overlay stream is not attached
+        });
+      }
     }
   }, []);
 
@@ -325,6 +419,7 @@ export default function App() {
 
       setIsActive(true);
       setActiveSignal(null);
+      setPriceLine(null);
 
       void notifyLocalOverlaySession(newSessionId).then((connected) => {
         setOverlayStatus(connected ? 'connected' : 'disconnected');
@@ -344,8 +439,13 @@ export default function App() {
         videoRef.current.srcObject = stream;
         void videoRef.current.play().catch(() => {});
         syncVideoRect();
+        trackCurrentPrice();
         void analyzeCurrentFrame();
       }, 150);
+
+      priceTimerRef.current = window.setInterval(() => {
+        trackCurrentPrice();
+      }, PRICE_POLL_MS);
 
       timerRef.current = window.setInterval(() => {
         void analyzeCurrentFrame();
@@ -358,7 +458,7 @@ export default function App() {
     } finally {
       isRequestingCaptureRef.current = false;
     }
-  }, [analyzeCurrentFrame, deactivate, syncVideoRect]);
+  }, [analyzeCurrentFrame, deactivate, syncVideoRect, trackCurrentPrice]);
 
   const handleToggle = useCallback(() => {
     if (isActiveRef.current) {
@@ -416,7 +516,12 @@ export default function App() {
             className="h-full w-full object-contain pointer-events-none select-none"
           />
 
-          <SignalOverlay active={isActive} signal={activeSignal} rect={videoRect} />
+          <SignalOverlay
+            active={isActive}
+            signal={activeSignal}
+            priceLine={priceLine}
+            rect={videoRect}
+          />
 
           {errorMessage && (
             <p

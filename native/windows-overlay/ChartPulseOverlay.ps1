@@ -89,49 +89,77 @@ $form.Add_Shown({
 $form.Add_Paint({
     param($sender, $e)
     $state = $script:CurrentState
-    if ($null -eq $state -or -not $state.active -or $null -eq $state.signal) {
+    if ($null -eq $state -or -not $state.active) {
         return
     }
 
-    $dir = [string]$state.signal.direction
-    if ($dir -ne "COMPRA" -and $dir -ne "VENDA") {
+    $hasPriceLine = $null -ne $state.priceLine
+    $dir = if ($null -ne $state.signal) { [string]$state.signal.direction } else { "" }
+    $hasSignal = ($dir -eq "COMPRA" -or $dir -eq "VENDA")
+
+    if (-not $hasPriceLine -and -not $hasSignal) {
         return
     }
 
     $g = $e.Graphics
-    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
 
-    $bounds = if ($null -ne $state.signal.chartBounds) { $state.signal.chartBounds } else { $state.chartBounds }
-    if ($null -ne $bounds -and $null -ne $state.signal.chartRelativeX -and $null -ne $state.signal.chartRelativeY) {
-        $normX = $bounds.x + ($state.signal.chartRelativeX * $bounds.width)
-        $normY = $bounds.y + ($state.signal.chartRelativeY * $bounds.height)
-    } else {
-        $normX = $state.signal.candleX
-        $normY = $state.signal.candleY
+    if ($hasPriceLine) {
+        $pBounds = if ($null -ne $state.priceLine.chartBounds) { $state.priceLine.chartBounds } else { $state.chartBounds }
+        if ($null -ne $pBounds -and $null -ne $state.priceLine.chartRelativeY) {
+            $normLineY = $pBounds.y + ($state.priceLine.chartRelativeY * $pBounds.height)
+            $lineX0 = [float]([Math]::Max(0.0, [Math]::Min(0.95, $pBounds.x)) * $form.ClientSize.Width)
+            $lineX1 = [float]([Math]::Max(0.1, [Math]::Min(1.0, $pBounds.x + $pBounds.width)) * $form.ClientSize.Width)
+        } else {
+            $normLineY = $state.priceLine.y
+            $lineX0 = [float](0.04 * $form.ClientSize.Width)
+            $lineX1 = [float](0.92 * $form.ClientSize.Width)
+        }
+
+        $lineY = [float]([Math]::Max(0.02, [Math]::Min(0.98, $normLineY)) * $form.ClientSize.Height)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
+        $shadowPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 8, 12, 18), 1)
+        $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 56, 189, 248), 2)
+        $g.DrawLine($shadowPen, $lineX0, $lineY + 1.5, $lineX1, $lineY + 1.5)
+        $g.DrawLine($linePen, $lineX0, $lineY, $lineX1, $lineY)
+        $shadowPen.Dispose()
+        $linePen.Dispose()
     }
 
-    $x = [float]($normX * $form.ClientSize.Width)
-    $y = [float]($normY * $form.ClientSize.Height)
+    if ($hasSignal) {
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
 
-    $font = New-Object System.Drawing.Font("Consolas", 13, [System.Drawing.FontStyle]::Bold)
-    $size = $g.MeasureString($dir, $font)
-    $drawX = $x - ($size.Width / 2)
-    $drawY = $y - ($size.Height / 2)
+        $bounds = if ($null -ne $state.signal.chartBounds) { $state.signal.chartBounds } else { $state.chartBounds }
+        if ($null -ne $bounds -and $null -ne $state.signal.chartRelativeX -and $null -ne $state.signal.chartRelativeY) {
+            $normX = $bounds.x + ($state.signal.chartRelativeX * $bounds.width)
+            $normY = $bounds.y + ($state.signal.chartRelativeY * $bounds.height)
+        } else {
+            $normX = $state.signal.candleX
+            $normY = $state.signal.candleY
+        }
 
-    $shadowBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 5, 5, 5))
-    $textColor = if ($dir -eq "COMPRA") {
-        [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
-    } else {
-        [System.Drawing.Color]::FromArgb(255, 239, 68, 68)
+        $x = [float]($normX * $form.ClientSize.Width)
+        $y = [float]($normY * $form.ClientSize.Height)
+
+        $font = New-Object System.Drawing.Font("Consolas", 13, [System.Drawing.FontStyle]::Bold)
+        $size = $g.MeasureString($dir, $font)
+        $drawX = $x - ($size.Width / 2)
+        $drawY = $y - ($size.Height / 2)
+
+        $shadowBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 5, 5, 5))
+        $textColor = if ($dir -eq "COMPRA") {
+            [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
+        } else {
+            [System.Drawing.Color]::FromArgb(255, 239, 68, 68)
+        }
+        $textBrush = New-Object System.Drawing.SolidBrush($textColor)
+
+        $g.DrawString($dir, $font, $shadowBrush, $drawX + 1, $drawY + 1)
+        $g.DrawString($dir, $font, $textBrush, $drawX, $drawY)
+
+        $font.Dispose()
+        $shadowBrush.Dispose()
+        $textBrush.Dispose()
     }
-    $textBrush = New-Object System.Drawing.SolidBrush($textColor)
-
-    $g.DrawString($dir, $font, $shadowBrush, $drawX + 1, $drawY + 1)
-    $g.DrawString($dir, $font, $textBrush, $drawX, $drawY)
-
-    $font.Dispose()
-    $shadowBrush.Dispose()
-    $textBrush.Dispose()
 })
 
 # Track whichever broker EXE or browser chart window the user focuses/clicks at 20Hz
@@ -186,8 +214,9 @@ $pollTimer.Add_Tick({
         $prevSig = if ($null -ne $script:CurrentState -and $null -ne $script:CurrentState.signal) { $script:CurrentState.signal.id } else { $null }
         $nextSig = if ($null -ne $parsed -and $null -ne $parsed.signal) { $parsed.signal.id } else { $null }
         $prevActive = if ($null -ne $script:CurrentState) { $script:CurrentState.active } else { $false }
+        $prevUpdated = if ($null -ne $script:CurrentState) { $script:CurrentState.updatedAt } else { 0 }
 
-        if ($prevSig -ne $nextSig -or $prevActive -ne $parsed.active) {
+        if ($prevSig -ne $nextSig -or $prevActive -ne $parsed.active -or $prevUpdated -ne $parsed.updatedAt) {
             $script:CurrentState = $parsed
             $form.Invalidate()
         }

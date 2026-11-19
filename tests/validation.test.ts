@@ -24,6 +24,7 @@ import netlifyHealthHandler from '../netlify/functions/health.ts';
 import netlifyOverlaySessionHandler from '../netlify/functions/overlay-session.ts';
 import netlifyOverlayClearHandler from '../netlify/functions/overlay-clear.ts';
 import netlifyOverlayStateHandler from '../netlify/functions/overlay-state.ts';
+import netlifyOverlayPriceHandler from '../netlify/functions/overlay-price.ts';
 
 function createSeededRng(seed: number): () => number {
   let s = seed >>> 0;
@@ -636,7 +637,265 @@ describe('ChartPulse AI — Netlify Deploy, SPA Fallback & All 5 Functions', () 
 
     const stateRes = await netlifyOverlayStateHandler();
     assert.equal(stateRes.status, 200);
-    const stateJson = (await stateRes.json()) as { active: boolean };
+    const stateJson = (await stateRes.json()) as { active: boolean; priceLine: unknown };
     assert.equal(stateJson.active, false);
+    assert.equal(stateJson.priceLine, null);
+
+    const priceReq = new Request('https://example.netlify.app/api/overlay/price', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-netlify-1',
+        priceLine: {
+          y: 0.44,
+          chartRelativeY: 0.48,
+          chartBounds: { x: 0.05, y: 0.1, width: 0.78, height: 0.75 },
+          confidence: 0.94,
+          source: 'PRICE_LINE',
+          updatedAt: Date.now(),
+        },
+      }),
+    });
+    const priceRes = await netlifyOverlayPriceHandler(priceReq);
+    assert.equal(priceRes.status, 200);
+  });
+});
+
+function renderChartWithLivePriceFrame(params: {
+  width: number;
+  height: number;
+  bg: [number, number, number];
+  bullColor: [number, number, number];
+  bearColor: [number, number, number];
+  priceRowFrac?: number;
+  drawPriceLine?: boolean;
+  drawRightAxisPill?: boolean;
+  drawGridLines?: boolean;
+  monochromeRightmost?: boolean;
+}): Uint8ClampedArray {
+  const {
+    width,
+    height,
+    bg,
+    bullColor,
+    bearColor,
+    priceRowFrac = 0.42,
+    drawPriceLine = true,
+    drawRightAxisPill = true,
+    drawGridLines = true,
+    monochromeRightmost = false,
+  } = params;
+
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    rgba[i * 4] = bg[0];
+    rgba[i * 4 + 1] = bg[1];
+    rgba[i * 4 + 2] = bg[2];
+    rgba[i * 4 + 3] = 255;
+  }
+
+  const paintRect = (
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: [number, number, number]
+  ) => {
+    for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+      for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+        const idx = (y * width + x) * 4;
+        rgba[idx] = color[0];
+        rgba[idx + 1] = color[1];
+        rgba[idx + 2] = color[2];
+      }
+    }
+  };
+
+  const plotX0 = Math.round(width * 0.06);
+  const plotX1 = Math.round(width * 0.80);
+  const plotY0 = Math.round(height * 0.12);
+  const plotY1 = Math.round(height * 0.86);
+
+  // Repeating low-saturation background grid lines (must be ignored by price line detector)
+  if (drawGridLines) {
+    const gridColor: [number, number, number] = [
+      Math.min(255, bg[0] + 40),
+      Math.min(255, bg[1] + 40),
+      Math.min(255, bg[2] + 40),
+    ];
+    for (const frac of [0.22, 0.37, 0.52, 0.67, 0.80]) {
+      const gy = Math.round(height * frac);
+      paintRect(plotX0, gy, plotX1, gy, gridColor);
+    }
+  }
+
+  // Draw 10 candlesticks inside the plot
+  const totalCandles = 10;
+  const candlesSpan = Math.round((plotX1 - plotX0) * 0.72);
+  const stepX = Math.max(10, Math.floor(candlesSpan / totalCandles));
+  const priceY = Math.round(height * priceRowFrac);
+
+  for (let i = 0; i < totalCandles; i++) {
+    const cx = plotX0 + 18 + i * stepX;
+    const isLast = i === totalCandles - 1;
+    const isBull = i % 2 === 0;
+    const color: [number, number, number] =
+      isLast && monochromeRightmost
+        ? [240, 240, 240]
+        : isBull
+          ? bullColor
+          : bearColor;
+
+    const bodyTop = isLast
+      ? isBull
+        ? priceY
+        : Math.max(plotY0 + 8, priceY - 24)
+      : plotY0 + 25 + ((i * 11) % 55);
+    const bodyBottom = isLast
+      ? isBull
+        ? Math.min(plotY1 - 8, priceY + 24)
+        : priceY
+      : bodyTop + 20;
+
+    paintRect(cx + 3, bodyTop - 6, cx + 3, bodyBottom + 6, color);
+    paintRect(cx, bodyTop, cx + 6, bodyBottom, color);
+  }
+
+  if (drawPriceLine) {
+    const lineColor: [number, number, number] = [56, 189, 248];
+    const lineStart = plotX0 + 18 + (totalCandles - 1) * stepX + 3;
+    paintRect(lineStart, priceY, plotX1, priceY + 1, lineColor);
+  }
+
+  if (drawRightAxisPill) {
+    paintRect(plotX1 + 2, priceY - 5, plotX1 + 30, priceY + 5, [56, 189, 248]);
+  }
+
+  return rgba;
+}
+
+describe('ChartPulse AI — Real-Time Price Tracking Line & Windows Overlay Sync', () => {
+  it('detects live horizontal price line accurately across dark and light charts while ignoring grid lines', () => {
+    const darkRgba = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [8, 153, 129],
+      bearColor: [242, 54, 69],
+      priceRowFrac: 0.38,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
+    });
+    const darkDigest = processFrameLocally(darkRgba, 640, 360, null);
+    assert.equal(darkDigest.chartDetected, true);
+    assert.ok(darkDigest.priceLine !== null);
+    assert.equal(darkDigest.priceLine.source, 'PRICE_LINE');
+    assert.ok(
+      Math.abs(darkDigest.priceLine.y - 0.38) <= 0.015,
+      `Expected dark priceLine.y near 0.38, got ${darkDigest.priceLine.y}`
+    );
+
+    const lightRgba = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [255, 255, 255],
+      bullColor: [8, 153, 129],
+      bearColor: [242, 54, 69],
+      priceRowFrac: 0.61,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+      drawGridLines: true,
+    });
+    const lightDigest = processFrameLocally(lightRgba, 640, 360, null);
+    assert.equal(lightDigest.chartDetected, true);
+    assert.ok(lightDigest.priceLine !== null);
+    assert.ok(
+      Math.abs(lightDigest.priceLine.y - 0.61) <= 0.015,
+      `Expected light priceLine.y near 0.61, got ${lightDigest.priceLine.y}`
+    );
+  });
+
+  it('tracks vertical price movement dynamically when the active price shifts', () => {
+    const frameUp = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.30,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+    });
+    const frameDown = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.66,
+      drawPriceLine: true,
+      drawRightAxisPill: true,
+    });
+
+    const d1 = processFrameLocally(frameUp, 640, 360, null);
+    const d2 = processFrameLocally(frameDown, 640, 360, d1.signature);
+    assert.ok(d1.priceLine !== null && d2.priceLine !== null);
+    assert.ok(d2.priceLine.y > d1.priceLine.y + 0.30);
+  });
+
+  it('falls back to unambiguous colored rightmost candle close when no horizontal price line is drawn, and returns null when ambiguous', () => {
+    const coloredCloseRgba = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [19, 23, 34],
+      bullColor: [34, 197, 94],
+      bearColor: [239, 68, 68],
+      priceRowFrac: 0.45,
+      drawPriceLine: false,
+      drawRightAxisPill: false,
+      drawGridLines: false,
+    });
+    const coloredDigest = processFrameLocally(coloredCloseRgba, 640, 360, null);
+    assert.equal(coloredDigest.chartDetected, true);
+    assert.ok(coloredDigest.priceLine !== null);
+    assert.equal(coloredDigest.priceLine.source, 'CANDLE_CLOSE');
+    assert.ok(Math.abs(coloredDigest.priceLine.y - 0.45) <= 0.02);
+
+    // Monochrome candle with no horizontal price line -> ambiguous close -> must NOT invent a line
+    const ambiguousRgba = renderChartWithLivePriceFrame({
+      width: 640,
+      height: 360,
+      bg: [0, 0, 0],
+      bullColor: [0, 255, 0],
+      bearColor: [255, 255, 255],
+      priceRowFrac: 0.45,
+      drawPriceLine: false,
+      drawRightAxisPill: false,
+      drawGridLines: false,
+      monochromeRightmost: true,
+    });
+    const ambiguousDigest = processFrameLocally(ambiguousRgba, 640, 360, null);
+    assert.equal(ambiguousDigest.priceLine, null);
+
+    // Empty frame -> must NOT invent a line
+    const emptyRgba = new Uint8ClampedArray(640 * 360 * 4);
+    const emptyDigest = processFrameLocally(emptyRgba, 640, 360, null);
+    assert.equal(emptyDigest.chartDetected, false);
+    assert.equal(emptyDigest.priceLine, null);
+  });
+
+  it('verifies ChartPulseOverlayHost.cs supports click-through transparent tracking line, window tracking, and /overlay/price', () => {
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /WS_EX_TRANSPARENT/);
+    assert.match(cs, /WS_EX_LAYERED/);
+    assert.match(cs, /DwmGetWindowAttribute/);
+    assert.match(cs, /"\/overlay\/price"/);
+    assert.match(cs, /UpdatePriceLine/);
+    assert.match(cs, /HasPriceLine/);
+    assert.match(cs, /priceLineSupported/);
   });
 });
