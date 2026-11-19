@@ -1,0 +1,6 @@
+{
+  "name": "ChartPulse AI",
+  "description": "Indicador visual inteligente que analisa o gráfico da corretora em tempo real e exibe sinais diretos de COMPRA e VENDA sobre as velas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

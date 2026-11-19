@@ -1,0 +1,473 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { SignalOverlay, type VideoDisplayRect } from './components/SignalOverlay.tsx';
+import { processFrameLocally } from './engine/localScreenProcessor.ts';
+import {
+  checkLocalOverlayHealth,
+  clearLocalOverlaySignals,
+  notifyLocalOverlaySession,
+  pushLocalOverlaySignal,
+  type OverlayConnectionState,
+} from './engine/localOverlayBridge.ts';
+import {
+  checkDisplayCaptureEnvironment,
+  classifyDisplayCaptureError,
+} from './engine/screenCaptureGuard.ts';
+import type { AnalyzeFrameResponse, VisualSignal } from './types/signals.ts';
+
+const CAPTURE_POLL_MS = 2200;
+const MIN_API_INTERVAL_MS = 4500;
+const SIGNAL_TTL_MS = 18000;
+const OVERLAY_HEALTH_POLL_MS = 5000;
+
+export default function App() {
+  const [isActive, setIsActive] = useState(false);
+  const [activeSignal, setActiveSignal] = useState<VisualSignal | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [videoRect, setVideoRect] = useState<VideoDisplayRect | null>(null);
+  const [overlayStatus, setOverlayStatus] = useState<OverlayConnectionState>('checking');
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const isActiveRef = useRef(false);
+  const isRequestingCaptureRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const inFlightRef = useRef(false);
+
+  const lastSignatureRef = useRef<Float32Array | null>(null);
+  const lastApiCallAtRef = useRef(0);
+  const cooldownUntilRef = useRef(0);
+  const lastSignalRef = useRef<VisualSignal | null>(null);
+
+  const syncVideoRect = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      setVideoRect(null);
+      return;
+    }
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const viewAspect = vw / vh;
+
+    let width = vw;
+    let height = vh;
+    let left = 0;
+    let top = 0;
+
+    if (videoAspect > viewAspect) {
+      width = vw;
+      height = vw / videoAspect;
+      top = (vh - height) / 2;
+    } else {
+      height = vh;
+      width = vh * videoAspect;
+      left = (vw - width) / 2;
+    }
+
+    setVideoRect({ left, top, width, height });
+  }, []);
+
+  const deactivate = useCallback(() => {
+    const closingSession = sessionIdRef.current;
+
+    isActiveRef.current = false;
+    sessionIdRef.current = null;
+    inFlightRef.current = false;
+    lastSignatureRef.current = null;
+    lastSignalRef.current = null;
+    cooldownUntilRef.current = 0;
+
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
+        track.onended = null;
+        track.stop();
+      }
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setIsActive(false);
+    setActiveSignal(null);
+    setVideoRect(null);
+
+    if (closingSession) {
+      void clearLocalOverlaySignals(closingSession);
+      void fetch('/api/overlay/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: closingSession }),
+      }).catch(() => {
+        // Ignore network errors during immediate teardown
+      });
+    }
+  }, []);
+
+  const analyzeCurrentFrame = useCallback(async () => {
+    if (!isActiveRef.current || !sessionIdRef.current) return;
+
+    const now = Date.now();
+    if (lastSignalRef.current && now > lastSignalRef.current.expiresAt) {
+      lastSignalRef.current = null;
+      setActiveSignal(null);
+    }
+
+    if (inFlightRef.current) return;
+    if (now < cooldownUntilRef.current) return;
+    if (now - lastApiCallAtRef.current < MIN_API_INTERVAL_MS) return;
+
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      return;
+    }
+
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+    }
+    const canvas = canvasRef.current;
+    const targetW = Math.min(1280, video.videoWidth);
+    const targetH = Math.max(1, Math.round((targetW / video.videoWidth) * video.videoHeight));
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, targetW, targetH);
+    const imgData = ctx.getImageData(0, 0, targetW, targetH);
+
+    const local = processFrameLocally(
+      imgData.data,
+      targetW,
+      targetH,
+      lastSignatureRef.current
+    );
+
+    // Local gating: skip Gemini API if no candlestick chart is visible or frame has not meaningfully changed
+    if (!local.chartDetected) {
+      return;
+    }
+    if (lastSignatureRef.current !== null && local.diffScore < 0.0085) {
+      return;
+    }
+
+    lastSignatureRef.current = local.signature;
+    lastApiCallAtRef.current = now;
+
+    const sessionAtSend = sessionIdRef.current;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    inFlightRef.current = true;
+
+    try {
+      const response = await fetch('/api/analyze-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          imageBase64: dataUrl,
+          mimeType: 'image/jpeg',
+          chartBounds: local.chartBounds,
+          sessionId: sessionAtSend,
+          lastSignal: lastSignalRef.current
+            ? {
+                direction: lastSignalRef.current.direction,
+                candleX: lastSignalRef.current.candleX,
+                candleId: lastSignalRef.current.candleId,
+                createdAt: lastSignalRef.current.createdAt,
+              }
+            : null,
+        }),
+      });
+
+      const result = (await response.json()) as AnalyzeFrameResponse;
+
+      // Discard stale responses if user deactivated or started a new session
+      if (!isActiveRef.current || sessionIdRef.current !== sessionAtSend) {
+        return;
+      }
+
+      if (response.status === 429 || result.rateLimited) {
+        const waitMs = Math.max(8000, result.retryAfterMs ?? 15000);
+        cooldownUntilRef.current = Date.now() + waitMs;
+        setErrorMessage(result.error ?? 'Limite temporário de requisições. Aguardando...');
+        return;
+      }
+
+      if (!response.ok || !result.ok) {
+        setErrorMessage(result.error ?? null);
+        return;
+      }
+
+      setErrorMessage(null);
+
+      if (result.signal === 'COMPRA' || result.signal === 'VENDA') {
+        const prev = lastSignalRef.current;
+        const isDuplicate =
+          prev !== null &&
+          prev.direction === result.signal &&
+          (Math.abs(prev.candleX - result.candleX) < 0.035 ||
+            (result.candleId !== '' && prev.candleId === result.candleId)) &&
+          Date.now() - prev.createdAt < 30000;
+
+        if (!isDuplicate) {
+          const nextSignal: VisualSignal = {
+            id: `${sessionAtSend}-${Date.now()}`,
+            direction: result.signal,
+            candleX: result.candleX,
+            candleY: result.candleY,
+            chartRelativeX: result.chartRelativeX,
+            chartRelativeY: result.chartRelativeY,
+            chartBounds: result.chartBounds ?? local.chartBounds,
+            confidence: result.confidence,
+            candleId: result.candleId,
+            marketRegime: result.marketRegime,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + SIGNAL_TTL_MS,
+          };
+          lastSignalRef.current = nextSignal;
+          setActiveSignal(nextSignal);
+          void pushLocalOverlaySignal(sessionAtSend, nextSignal);
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
+      if (isActiveRef.current) {
+        setErrorMessage('Falha momentânea na análise visual. Tentando novamente...');
+      }
+    } finally {
+      inFlightRef.current = false;
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
+    }
+  }, []);
+
+  const activate = useCallback(async () => {
+    if (isRequestingCaptureRef.current || isActiveRef.current) {
+      return;
+    }
+
+    const envCheck = checkDisplayCaptureEnvironment();
+    if (!envCheck.supported) {
+      setErrorMessage(envCheck.message);
+      return;
+    }
+
+    setErrorMessage(null);
+    isRequestingCaptureRef.current = true;
+
+    const isInIframe = (() => {
+      try {
+        return window.self !== window.top;
+      } catch {
+        return true;
+      }
+    })();
+
+    const startedAt = Date.now();
+
+    try {
+      // Called synchronously inside the user's click gesture without any prior await
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+      const [videoTrack] = stream.getVideoTracks();
+      if (!videoTrack || videoTrack.readyState === 'ended') {
+        stream.getTracks().forEach((t) => t.stop());
+        setErrorMessage('Nenhuma tela ou janela ativa foi selecionada.');
+        return;
+      }
+
+      if (typeof videoTrack.applyConstraints === 'function') {
+        void videoTrack.applyConstraints({ frameRate: { ideal: 3, max: 5 } }).catch(() => {});
+      }
+
+      const newSessionId = `cp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      streamRef.current = stream;
+      sessionIdRef.current = newSessionId;
+      isActiveRef.current = true;
+      lastSignatureRef.current = null;
+      lastSignalRef.current = null;
+      lastApiCallAtRef.current = 0;
+      cooldownUntilRef.current = 0;
+
+      videoTrack.onended = () => {
+        deactivate();
+      };
+
+      setIsActive(true);
+      setActiveSignal(null);
+
+      void notifyLocalOverlaySession(newSessionId).then((connected) => {
+        setOverlayStatus(connected ? 'connected' : 'disconnected');
+      });
+
+      void fetch('/api/overlay/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: newSessionId }),
+      }).catch(() => {
+        // Non-fatal if SSE bridge isn't attached
+      });
+
+      // Wait a tick for the <video> element to mount and attach stream
+      window.setTimeout(() => {
+        if (!isActiveRef.current || !videoRef.current) return;
+        videoRef.current.srcObject = stream;
+        void videoRef.current.play().catch(() => {});
+        syncVideoRect();
+        void analyzeCurrentFrame();
+      }, 150);
+
+      timerRef.current = window.setInterval(() => {
+        void analyzeCurrentFrame();
+      }, CAPTURE_POLL_MS);
+    } catch (err) {
+      const elapsedMs = Date.now() - startedAt;
+      setIsActive(false);
+      isActiveRef.current = false;
+      setErrorMessage(classifyDisplayCaptureError(err, elapsedMs, isInIframe));
+    } finally {
+      isRequestingCaptureRef.current = false;
+    }
+  }, [analyzeCurrentFrame, deactivate, syncVideoRect]);
+
+  const handleToggle = useCallback(() => {
+    if (isActiveRef.current) {
+      deactivate();
+    } else {
+      void activate();
+    }
+  }, [activate, deactivate]);
+
+  useEffect(() => {
+    window.addEventListener('resize', syncVideoRect);
+    return () => {
+      window.removeEventListener('resize', syncVideoRect);
+    };
+  }, [syncVideoRect]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const probeOverlay = async () => {
+      const ok = await checkLocalOverlayHealth();
+      if (!cancelled) {
+        setOverlayStatus(ok ? 'connected' : 'disconnected');
+      }
+    };
+
+    void probeOverlay();
+    const id = window.setInterval(() => {
+      void probeOverlay();
+    }, OVERLAY_HEALTH_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (isActiveRef.current) {
+        deactivate();
+      }
+    };
+  }, [deactivate]);
+
+  return (
+    <main className="relative h-screen w-screen overflow-hidden bg-[#0B0E11] flex items-center justify-center">
+      {isActive ? (
+        <>
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            onLoadedMetadata={syncVideoRect}
+            className="h-full w-full object-contain pointer-events-none select-none"
+          />
+
+          <SignalOverlay active={isActive} signal={activeSignal} rect={videoRect} />
+
+          {errorMessage && (
+            <p
+              role="status"
+              className="pointer-events-none fixed top-5 left-1/2 -translate-x-1/2 z-30 text-xs text-slate-300/90 bg-black/70 px-3 py-1.5 rounded"
+            >
+              {errorMessage}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleToggle}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 min-h-[44px] px-7 py-2.5 rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] active:scale-[0.99] text-white font-semibold text-sm tracking-wide shadow-lg transition-all cursor-pointer whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400"
+          >
+            DESATIVAR ANÁLISE
+          </button>
+        </>
+      ) : (
+        <div className="flex flex-col items-center justify-center gap-6 px-6 text-center">
+          <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-slate-100">
+            ChartPulse AI
+          </h1>
+
+          <button
+            type="button"
+            onClick={handleToggle}
+            className="min-h-[48px] px-9 py-3 rounded-lg bg-[#16A34A] hover:bg-[#15803D] active:scale-[0.99] text-white font-semibold text-base tracking-wide shadow-lg transition-all cursor-pointer whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+          >
+            ATIVAR ANÁLISE
+          </button>
+
+          {errorMessage && (
+            <p role="alert" className="text-xs text-red-400 max-w-md leading-relaxed">
+              {errorMessage}
+            </p>
+          )}
+
+          <p className="text-xs max-w-md leading-relaxed text-slate-400">
+            {overlayStatus === 'connected' ? (
+              <span className="text-emerald-400">
+                Overlay Windows: conectado em segundo plano
+              </span>
+            ) : overlayStatus === 'checking' ? (
+              'Overlay Windows: verificando conexão local...'
+            ) : (
+              'Overlay Windows: desligado — execute ChartPulseOverlaySetup.exe ou abra ChartPulseOverlay.exe no Windows para exibir sinais sobre a corretora.'
+            )}
+          </p>
+        </div>
+      )}
+    </main>
+  );
+}

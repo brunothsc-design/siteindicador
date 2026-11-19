@@ -1,0 +1,68 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Permissions-Policy = "display-capture=(self)"
+
+[[redirects]]
+  from = "/api/analyze-frame"
+  to = "/.netlify/functions/analyze-frame"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/health"
+  to = "/.netlify/functions/health"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay/session"
+  to = "/.netlify/functions/overlay-session"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay/clear"
+  to = "/.netlify/functions/overlay-clear"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay/state"
+  to = "/.netlify/functions/overlay-state"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-session"
+  to = "/.netlify/functions/overlay-session"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-clear"
+  to = "/.netlify/functions/overlay-clear"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/overlay-state"
+  to = "/.netlify/functions/overlay-state"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

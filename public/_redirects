@@ -1,0 +1,9 @@
+/api/analyze-frame /.netlify/functions/analyze-frame 200!
+/api/health /.netlify/functions/health 200!
+/api/overlay/session /.netlify/functions/overlay-session 200!
+/api/overlay/clear /.netlify/functions/overlay-clear 200!
+/api/overlay/state /.netlify/functions/overlay-state 200!
+/api/overlay-session /.netlify/functions/overlay-session 200!
+/api/overlay-clear /.netlify/functions/overlay-clear 200!
+/api/overlay-state /.netlify/functions/overlay-state 200!
+/* /index.html 200
