@@ -1,4 +1,5 @@
 import type {
+  ChartBounds,
   LiveCandleTracker,
   OperationalStatusState,
   PriceLine,
@@ -90,7 +91,7 @@ async function fetchLocalOverlay(
   timeoutMs = 1200
 ): Promise<Response | null> {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${LOCAL_OVERLAY_URL}${path}`, {
@@ -103,7 +104,7 @@ async function fetchLocalOverlay(
   } catch {
     return null;
   } finally {
-    window.clearTimeout(timer);
+    globalThis.clearTimeout(timer);
   }
 }
 
@@ -153,10 +154,149 @@ export async function pushLocalOverlaySignal(
   return Boolean(res && res.ok);
 }
 
+interface CachedLiveCandleEntry {
+  sessionId: string;
+  liveCandle: LiveCandleTracker;
+  updatedAt: number;
+}
+
+let cachedLiveCandle: CachedLiveCandleEntry | null = null;
+const LIVE_CANDLE_ANCHOR_CACHE_MS = 2500;
+
+function clampUnit(value: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Number(Math.max(0, Math.min(1, value)).toFixed(4));
+}
+
+function sanitizeBounds(bounds: ChartBounds | null | undefined): ChartBounds | null {
+  if (!bounds) return null;
+  const x = clampUnit(bounds.x, 0);
+  const y = clampUnit(bounds.y, 0);
+  const width = clampUnit(bounds.width, 0);
+  const height = clampUnit(bounds.height, 0);
+  if (width <= 0.05 || height <= 0.05) return null;
+  return { x, y, width, height };
+}
+
+function sanitizeLiveCandle(liveCandle: LiveCandleTracker): LiveCandleTracker | null {
+  if (
+    typeof liveCandle.x !== 'number' ||
+    typeof liveCandle.y !== 'number' ||
+    !Number.isFinite(liveCandle.x) ||
+    !Number.isFinite(liveCandle.y)
+  ) {
+    return null;
+  }
+  return {
+    ...liveCandle,
+    x: clampUnit(liveCandle.x, 0.5),
+    y: clampUnit(liveCandle.y, 0.5),
+    chartRelativeX: clampUnit(liveCandle.chartRelativeX, liveCandle.x),
+    chartRelativeY: clampUnit(liveCandle.chartRelativeY, liveCandle.y),
+    topY: clampUnit(liveCandle.topY, liveCandle.y),
+    bottomY: clampUnit(liveCandle.bottomY, liveCandle.y),
+    chartBounds: sanitizeBounds(liveCandle.chartBounds),
+  };
+}
+
+export function buildOperationalStatusPayloadWithLiveCandle(
+  sessionId: string,
+  operationalStatus: OperationalStatusState | null
+): OperationalStatusState | null {
+  if (!operationalStatus) return null;
+  const now = Date.now();
+  const safeBounds = sanitizeBounds(operationalStatus.chartBounds);
+
+  if (
+    operationalStatus.anchor &&
+    Number.isFinite(operationalStatus.anchor.x) &&
+    Number.isFinite(operationalStatus.anchor.y)
+  ) {
+    return {
+      ...operationalStatus,
+      chartBounds: safeBounds,
+      anchor: {
+        x: clampUnit(operationalStatus.anchor.x, 0.5),
+        y: clampUnit(operationalStatus.anchor.y, 0.5),
+        chartRelativeX: clampUnit(
+          operationalStatus.anchor.chartRelativeX,
+          operationalStatus.anchor.x
+        ),
+        chartRelativeY: clampUnit(
+          operationalStatus.anchor.chartRelativeY,
+          operationalStatus.anchor.y
+        ),
+        candleTopY: clampUnit(
+          operationalStatus.anchor.candleTopY,
+          operationalStatus.anchor.y
+        ),
+        updatedAt: operationalStatus.anchor.updatedAt || now,
+      },
+    };
+  }
+
+  if (
+    cachedLiveCandle &&
+    cachedLiveCandle.sessionId === sessionId &&
+    now - cachedLiveCandle.updatedAt <= LIVE_CANDLE_ANCHOR_CACHE_MS
+  ) {
+    const lc = cachedLiveCandle.liveCandle;
+    const candleTopY = clampUnit(Math.min(lc.topY, lc.y), lc.y);
+    const rawAnchorY = Math.max(0.02, candleTopY - 0.016);
+    const lcBounds = lc.chartBounds ?? safeBounds;
+    const anchorX = lcBounds
+      ? clampUnit(lcBounds.x + lc.chartRelativeX * lcBounds.width, lc.x)
+      : clampUnit(lc.x, 0.5);
+    const anchorY = lcBounds
+      ? clampUnit(
+          Math.max(
+            lcBounds.y + Math.min(0.014, lcBounds.height * 0.05),
+            Math.min(lcBounds.y + lcBounds.height - 0.015, rawAnchorY)
+          ),
+          rawAnchorY
+        )
+      : clampUnit(rawAnchorY, 0.05);
+    const relX = lcBounds
+      ? clampUnit((anchorX - lcBounds.x) / Math.max(0.05, lcBounds.width), lc.chartRelativeX)
+      : anchorX;
+    const relY = lcBounds
+      ? clampUnit((anchorY - lcBounds.y) / Math.max(0.05, lcBounds.height), lc.chartRelativeY)
+      : anchorY;
+
+    return {
+      ...operationalStatus,
+      chartBounds: lcBounds,
+      anchor: {
+        x: anchorX,
+        y: anchorY,
+        chartRelativeX: relX,
+        chartRelativeY: relY,
+        candleTopY,
+        updatedAt: now,
+      },
+    };
+  }
+
+  return {
+    ...operationalStatus,
+    chartBounds: safeBounds,
+  };
+}
+
 export async function pushLocalOverlayPrice(
   sessionId: string,
   priceLine: PriceLine | null
 ): Promise<boolean> {
+  const safePrice =
+    priceLine && Number.isFinite(priceLine.y)
+      ? {
+          ...priceLine,
+          y: clampUnit(priceLine.y, 0.5),
+          chartRelativeY: clampUnit(priceLine.chartRelativeY, priceLine.y),
+          chartBounds: sanitizeBounds(priceLine.chartBounds),
+        }
+      : null;
+
   const res = await fetchLocalOverlay(
     '/overlay/price',
     {
@@ -164,7 +304,7 @@ export async function pushLocalOverlayPrice(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId,
-        priceLine,
+        priceLine: safePrice,
       }),
     },
     1000
@@ -176,6 +316,19 @@ export async function pushLocalOverlayCandle(
   sessionId: string,
   liveCandle: LiveCandleTracker | null
 ): Promise<boolean> {
+  const safeCandle = liveCandle ? sanitizeLiveCandle(liveCandle) : null;
+  if (safeCandle) {
+    cachedLiveCandle = {
+      sessionId,
+      liveCandle: safeCandle,
+      updatedAt: Date.now(),
+    };
+  } else if (cachedLiveCandle && cachedLiveCandle.sessionId === sessionId) {
+    if (Date.now() - cachedLiveCandle.updatedAt > LIVE_CANDLE_ANCHOR_CACHE_MS) {
+      cachedLiveCandle = null;
+    }
+  }
+
   const res = await fetchLocalOverlay(
     '/overlay/candle',
     {
@@ -183,7 +336,7 @@ export async function pushLocalOverlayCandle(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId,
-        liveCandle,
+        liveCandle: safeCandle,
       }),
     },
     1000
@@ -195,6 +348,7 @@ export async function pushLocalOverlayStatus(
   sessionId: string,
   operationalStatus: OperationalStatusState | null
 ): Promise<boolean> {
+  const payload = buildOperationalStatusPayloadWithLiveCandle(sessionId, operationalStatus);
   const res = await fetchLocalOverlay(
     '/overlay/status',
     {
@@ -202,7 +356,7 @@ export async function pushLocalOverlayStatus(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId,
-        operationalStatus,
+        operationalStatus: payload,
       }),
     },
     1000
@@ -211,6 +365,7 @@ export async function pushLocalOverlayStatus(
 }
 
 export async function clearLocalOverlaySignals(sessionId: string | null): Promise<boolean> {
+  cachedLiveCandle = null;
   const res = await fetchLocalOverlay(
     '/overlay/clear',
     {

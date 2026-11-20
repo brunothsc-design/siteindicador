@@ -764,6 +764,10 @@ namespace ChartPulseOverlayAgent
                     _state.StatusBoundsW = bw;
                     _state.StatusBoundsH = bh;
                 }
+                else if (hasAnchor)
+                {
+                    _state.HasStatusBounds = false;
+                }
                 if (hasAnchor)
                 {
                     _state.HasStatusAnchor = true;
@@ -774,10 +778,14 @@ namespace ChartPulseOverlayAgent
                 }
                 else
                 {
-                    bool recentCandle = _state.HasLiveCandle && (nowMs - _state.LiveCandleUpdatedAtMs <= 1500);
+                    bool recentCandle = _state.HasLiveCandle && (nowMs - _state.LiveCandleUpdatedAtMs <= 2500);
                     if (!recentCandle)
                     {
                         _state.HasStatusAnchor = false;
+                    }
+                    else if (_state.HasStatusAnchor)
+                    {
+                        _forceRepaint = true;
                     }
                 }
                 _state.StatusUpdatedAtMs = nowMs;

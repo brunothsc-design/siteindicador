@@ -30,7 +30,14 @@ import {
   USE_TEMPORARY_TEST_CONFIDENCE,
   isSignalConfidenceValid,
 } from '../src/config/signalConfig.ts';
-import { isTrustedOverlayOrigin } from '../src/engine/localOverlayBridge.ts';
+import {
+  buildOperationalStatusPayloadWithLiveCandle,
+  clearLocalOverlaySignals,
+  isTrustedOverlayOrigin,
+  pushLocalOverlayCandle,
+  pushLocalOverlayStatus,
+} from '../src/engine/localOverlayBridge.ts';
+import type { OperationalStatusState } from '../src/types/signals.ts';
 import {
   CANDLE_ANCHOR_HOLD_MS,
   MANDATORY_TIMEFRAME,
@@ -2184,13 +2191,137 @@ describe('ChartPulse AI — 8-Stage Real-Time Broker Overlay Pipeline & Non-Econ
     const cleared = resolveOperationalStatus({
       isActive: false,
       current: sellStatus,
-      activeSignal: sellSig,
+      activeSignal: null,
       liveCandle: null,
       latestBounds: bounds,
       chartDetected: true,
       now: t0 + 5000,
     });
     assert.equal(cleared, null);
+  });
+
+  it('detects 2px IQ Option/Quotex M1 candles + monochrome badge, bridges real anchor via localOverlayBridge without inventing coordinates, and confirms C# AGUARDANDO paint path', async () => {
+    const width = 1280;
+    const height = 720;
+    const bg: [number, number, number] = [28, 32, 48];
+    const bull: [number, number, number] = [34, 197, 94];
+    const bear: [number, number, number] = [239, 68, 68];
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+        for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+          const idx = (y * width + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+
+    // 40 narrow 2px-wide M1 candles + 1 active forming green candle + 9x19 monochrome countdown badge
+    let activeX0 = 0;
+    for (let i = 0; i < 40; i++) {
+      const cx = 140 + i * 16;
+      activeX0 = cx;
+      const isBull = i % 2 === 0 || i === 39;
+      const c = isBull ? bull : bear;
+      const top = i === 39 ? 290 : 285 + ((i * 9) % 45);
+      const bot = i === 39 ? 334 : top + 16 + (i % 8);
+      paint(cx, top - 6, cx, bot + 6, c); // 1px wick
+      paint(cx, top, cx + 1, bot, c); // 2px body
+    }
+
+    // Monochrome white countdown pill right of the forming M1 candle (9x19)
+    paint(activeX0 + 14, 302, activeX0 + 22, 320, [226, 232, 240]);
+
+    const digest = processFrameLocally(rgba, width, height, null);
+    assert.equal(digest.chartDetected, true, 'Must detect narrow 2px M1 chart');
+    assert.ok(digest.chartBounds !== null);
+
+    const detected = detectLiveMovingCandleWithReason(
+      rgba,
+      width,
+      height,
+      digest.chartBounds,
+      digest.priceLine,
+      digest.chartDetected
+    );
+    assert.equal(detected.reason, null);
+    assert.ok(detected.candle !== null, 'Must detect 2px forming candle despite monochrome 9x19 countdown badge');
+    assert.ok(
+      Math.abs(detected.candle.x - (activeX0 + 0.5) / width) <= 0.015,
+      `Expected forming candle near x=${activeX0}, got ${detected.candle.x * width}`
+    );
+
+    const anchor = computeCandleStatusAnchor(detected.candle, digest.chartBounds, 1700000000000);
+    assert.ok(anchor !== null && anchor.y < detected.candle.topY);
+
+    // Bridge test: push real liveCandle and verify /overlay/status populates real anchor when status.anchor is null,
+    // and never invents coordinates after clearLocalOverlaySignals
+    const originalFetch = globalThis.fetch;
+    const sentBodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sentBodies.push({
+        url: String(input),
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {},
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await clearLocalOverlaySignals('bridge-sess-1');
+      const noCandlePayload = buildOperationalStatusPayloadWithLiveCandle('bridge-sess-1', {
+        status: 'AGUARDANDO',
+        timeframe: 'M1',
+        confidence: 0,
+        anchor: null,
+        chartBounds: digest.chartBounds,
+        expiresAt: null,
+        updatedAt: Date.now(),
+      });
+      assert.equal(noCandlePayload?.anchor, null, 'Must never invent anchor when no liveCandle exists');
+
+      const candleOk = await pushLocalOverlayCandle('bridge-sess-1', detected.candle);
+      assert.equal(candleOk, true);
+
+      const statusOk = await pushLocalOverlayStatus('bridge-sess-1', {
+        status: 'AGUARDANDO',
+        timeframe: 'M1',
+        confidence: 0,
+        anchor: null,
+        chartBounds: digest.chartBounds,
+        expiresAt: null,
+        updatedAt: Date.now(),
+      });
+      assert.equal(statusOk, true);
+
+      const lastStatusCall = sentBodies.find((c) => c.url.endsWith('/overlay/status'));
+      assert.ok(lastStatusCall);
+      const sentOp = lastStatusCall.body.operationalStatus as OperationalStatusState;
+      assert.ok(sentOp.anchor !== null, 'Bridge must supply real candle anchor to /overlay/status (hasStatusAnchor=true)');
+      assert.equal(sentOp.status, 'AGUARDANDO');
+      assert.ok(sentOp.anchor.y < detected.candle.topY);
+    } finally {
+      await clearLocalOverlaySignals('bridge-sess-1');
+      globalThis.fetch = originalFetch;
+    }
+
+    // C# host check: AGUARDANDO renders and increments _paintCount whenever HasStatusAnchor is true, even without COMPRA/VENDA
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /bool hasOpStatus = snapshot\.Active && snapshot\.HasStatusAnchor;/);
+    assert.match(cs, /if \(!hasPriceLine && !hasLiveCandle && !hasOpStatus\)/);
+    assert.match(cs, /long paintSeq = Interlocked\.Increment\(ref _paintCount\);/);
+    assert.match(cs, /UpdateOperationalStatus/);
+    assert.match(cs, /nowMs - _state\.LiveCandleUpdatedAtMs <= 2500/);
   });
 });
 

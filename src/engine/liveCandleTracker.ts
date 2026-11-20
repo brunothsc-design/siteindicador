@@ -66,17 +66,17 @@ function classifyPixel(
   bg: { r: number; g: number; b: number }
 ): 'BULL' | 'BEAR' | 'MONO' | null {
   const bgDiff = colorDist(r, g, b, bg.r, bg.g, bg.b);
-  if (bgDiff < 36) return null;
+  if (bgDiff < 30) return null;
 
   const maxC = Math.max(r, g, b);
   const minC = Math.min(r, g, b);
   const saturation = maxC - minC;
 
-  if (saturation >= 24) {
-    if ((g >= r + 12 && g >= b - 12) || (b >= r + 20 && g >= r + 10)) {
+  if (saturation >= 18) {
+    if ((g >= r + 10 && g >= b - 16) || (b >= r + 18 && g >= r + 8)) {
       return 'BULL';
     }
-    if (r >= g + 14 && r >= b + 4) {
+    if (r >= g + 12 && r >= b - 4) {
       return 'BEAR';
     }
   }
@@ -221,7 +221,7 @@ export function detectLiveMovingCandle(
     let tCluster: ColStats[] = [tinyColoredCols[0]];
     const flushTiny = () => {
       const span = tCluster[tCluster.length - 1].px - tCluster[0].px + 1;
-      if (tCluster.length >= 2 && span <= 16) {
+      if (tCluster.length >= 1 && span <= 16) {
         const lastValidPx = validCols.length > 0 ? validCols[validCols.length - 1].px : -1;
         if (tCluster[0].px > lastValidPx) {
           validCols.push(...tCluster);
@@ -305,12 +305,13 @@ export function detectLiveMovingCandle(
       return false;
     }
 
-    // Exclude thin 1-3px vertical divider/expiration/deadline lines (monochrome OR colored, solid OR dashed — IQ Option, Quotex, Pocket Option, TradingView)
+    // Exclude thin 1-3px vertical divider/expiration/deadline lines while preserving tall thin M1 candles with wicks
     const totalFillDensity = totalPixels / Math.max(1, spanPx * clusterVertSpan);
+    const minExpSpan = clusterBull + clusterBear > 0 ? plotH * 0.50 : plotH * 0.35;
     if (
       spanPx <= 3 &&
       (clusterVertSpan >= plotH * 0.55 ||
-        (clusterVertSpan >= plotH * 0.35 && totalFillDensity <= 0.58))
+        (clusterVertSpan >= minExpSpan && totalFillDensity <= 0.58))
     ) {
       return false;
     }
@@ -338,7 +339,40 @@ export function detectLiveMovingCandle(
     return null;
   }
 
-  const rightmost = candleClusters[candleClusters.length - 1];
+  // Prefer the rightmost colored forming candle over trailing monochrome countdown/icon/crosshair artifacts,
+  // while keeping genuine tall solid monochrome rightmost candles intact so ambiguous charts still return null.
+  const hasColoredCandles = candleClusters.some((c) => c.some((col) => col.bull + col.bear >= 2));
+  let rightmost = candleClusters[candleClusters.length - 1];
+  if (hasColoredCandles) {
+    for (let i = candleClusters.length - 1; i >= 0; i--) {
+      const candidate = candleClusters[i];
+      let cBull = 0;
+      let cBear = 0;
+      let cMono = 0;
+      let cPixels = 0;
+      let cMinPy = height;
+      let cMaxPy = -1;
+      for (const col of candidate) {
+        cBull += col.bull;
+        cBear += col.bear;
+        cMono += col.mono;
+        cPixels += col.activeRows.length;
+        if (col.minPy < cMinPy) cMinPy = col.minPy;
+        if (col.maxPy > cMaxPy) cMaxPy = col.maxPy;
+      }
+      if (cBull + cBear >= 2) {
+        rightmost = candidate;
+        break;
+      }
+      const cSpanPx = candidate[candidate.length - 1].px - candidate[0].px + 1;
+      const cVertSpan = cMaxPy - cMinPy + 1;
+      const cFillDensity = cPixels / Math.max(1, cSpanPx * cVertSpan);
+      if (cMono > 0 && cSpanPx >= 5 && cVertSpan >= 24 && cFillDensity >= 0.72) {
+        rightmost = candidate;
+        break;
+      }
+    }
+  }
   let topPy = height;
   let bottomPy = -1;
   let bullTotal = 0;
