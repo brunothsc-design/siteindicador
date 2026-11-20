@@ -1104,7 +1104,7 @@ describe('ChartPulse AI — Additional Live Forming Candle Tracking', () => {
     assert.match(cs, /UpdateLiveCandle/);
     assert.match(cs, /HasLiveCandle/);
     assert.match(cs, /liveCandleSupported/);
-    assert.match(cs, /\\"version\\":\\"1\.(?:2|3)\.0\\"/);
+    assert.match(cs, /\\"version\\":\\"1\.(?:2|3)\.(?:0|1)\\"/);
     assert.match(cs, /"\/overlay\/price"/);
     assert.match(cs, /"\/overlay\/signal"/);
   });
@@ -1574,13 +1574,19 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
       path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
       'utf8'
     );
-    assert.match(cs, /\\"version\\":\\"1\.3\.0\\"/);
+    assert.match(cs, /\\"version\\":\\"1\.3\.1\\"/);
     assert.match(cs, /operationalStatusSupported/);
     assert.match(cs, /hasStatusAnchor/);
     assert.match(cs, /"\/overlay\/status"/);
     assert.match(cs, /HasStatusAnchor/);
     assert.match(cs, /_smoothStatusNormX/);
     assert.match(cs, /AGUARDANDO/);
+    assert.match(cs, /SetProcessDpiAwarenessContext/);
+    assert.match(cs, /IsWindowVisible/);
+    assert.match(cs, /FindBestBrokerFallbackWindow/);
+    assert.match(cs, /ThreadPool\.QueueUserWorkItem/);
+    assert.match(cs, /LiveCandleTopY/);
+    assert.match(cs, /UtcNowMs\(\)/);
     // Opaque status background avoids TransparencyKey Magenta bleed on WinForms layered windows
     assert.match(cs, /statusBg = new SolidBrush\(Color\.FromArgb\(255, 11, 14, 17\)\)/);
   });
@@ -1692,7 +1698,73 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     assert.match(electronSrc, /border-radius:\s*8px/);
     assert.doesNotMatch(electronSrc, /id="sig"/);
   });
+
+  it('ignores colored and dashed broker vertical expiration lines so AGUARDANDO anchors to the real forming M1 candle', () => {
+    const width = 640;
+    const height = 360;
+    const bg: [number, number, number] = [28, 32, 48];
+    const bull: [number, number, number] = [14, 203, 129];
+    const bear: [number, number, number] = [246, 70, 93];
+
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+        for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+          const idx = (y * width + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+
+    for (let i = 0; i < 10; i++) {
+      const x0 = 110 + i * 24;
+      const c = i % 2 === 0 ? bear : bull;
+      paint(x0 + 3, 125 + i * 2, x0 + 3, 210 + i * 2, c);
+      paint(x0, 145 + i * 2, x0 + 6, 188 + i * 2, c);
+    }
+
+    const activeX0 = 362;
+    paint(activeX0 + 3, 130, activeX0 + 3, 185, bull);
+    paint(activeX0, 142, activeX0 + 6, 174, bull);
+
+    // Colored dashed IQ Option / Quotex vertical deadline line right of the active M1 candle
+    for (let py = 30; py <= 315; py += 8) {
+      paint(410, py, 411, Math.min(315, py + 4), [245, 130, 32]);
+    }
+
+    const digest = processFrameLocally(rgba, width, height, null);
+    assert.equal(digest.chartDetected, true);
+
+    const detected = detectLiveMovingCandleWithReason(
+      rgba,
+      width,
+      height,
+      digest.chartBounds,
+      digest.priceLine,
+      digest.chartDetected
+    );
+    assert.equal(detected.reason, null);
+    assert.ok(detected.candle !== null);
+    assert.ok(
+      Math.abs(detected.candle.x - (activeX0 + 3) / width) <= 0.015,
+      `Expected forming M1 candle at ${activeX0 + 3}, got x=${detected.candle.x}`
+    );
+
+    const anchor = computeCandleStatusAnchor(detected.candle, digest.chartBounds);
+    assert.ok(anchor !== null);
+    assert.ok(Math.abs(anchor.x - detected.candle.x) <= 0.015);
+    assert.ok(anchor.y < detected.candle.topY);
+  });
 });
+
 
 
 

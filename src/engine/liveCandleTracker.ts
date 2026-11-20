@@ -291,8 +291,13 @@ export function detectLiveMovingCandle(
       return false;
     }
 
-    // Exclude full-height 1-2px monochrome vertical divider/expiration lines (IQ Option, Quotex, TradingView)
-    if (spanPx <= 2 && clusterBull === 0 && clusterBear === 0 && clusterVertSpan >= plotH * 0.75) {
+    // Exclude thin 1-3px vertical divider/expiration/deadline lines (monochrome OR colored, solid OR dashed — IQ Option, Quotex, Pocket Option, TradingView)
+    const totalFillDensity = totalPixels / Math.max(1, spanPx * clusterVertSpan);
+    if (
+      spanPx <= 3 &&
+      (clusterVertSpan >= plotH * 0.55 ||
+        (clusterVertSpan >= plotH * 0.35 && totalFillDensity <= 0.58))
+    ) {
       return false;
     }
 
@@ -367,6 +372,9 @@ export function detectLiveMovingCandle(
   } else if (monoTotal >= 4 && bodyBottom - bodyTop <= 4) {
     closePy = Math.round((bodyTop + bodyBottom) / 2);
     confidence = 0.72;
+  } else if (bullTotal + bearTotal + monoTotal >= 3 && verifiedPriceLine) {
+    closePy = Math.round((bodyTop + bodyBottom) / 2);
+    confidence = 0.7;
   }
 
   // Anchor vertical price strictly to a real verified horizontal price line or unambiguous candle close

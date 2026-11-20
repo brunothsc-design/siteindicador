@@ -35,7 +35,7 @@ import type {
 } from './types/signals.ts';
 
 const CAPTURE_POLL_MS = 2200;
-const PRICE_POLL_MS = 350;
+const PRICE_POLL_MS = 250;
 const MIN_API_INTERVAL_MS = 4500;
 const SIGNAL_TTL_MS = 18000;
 const OVERLAY_HEALTH_POLL_MS = 5000;
@@ -128,6 +128,7 @@ export default function App() {
   const lastChartBoundsRef = useRef<ChartBounds | null>(null);
   const lastDiagStateRef = useRef<string>('');
   const localAgentReadyRef = useRef(false);
+  const displaySurfaceRef = useRef<string>('window');
 
   const syncVideoRect = useCallback(() => {
     const video = videoRef.current;
@@ -176,6 +177,7 @@ export default function App() {
     lastChartBoundsRef.current = null;
     lastDiagStateRef.current = '';
     localAgentReadyRef.current = false;
+    displaySurfaceRef.current = 'window';
     cooldownUntilRef.current = 0;
 
     if (timerRef.current !== null) {
@@ -255,7 +257,7 @@ export default function App() {
       if (!nextStatus) return;
 
       const changed = operationalStatusChanged(lastOperationalStatusRef.current, nextStatus);
-      const heartbeatDue = now - lastStatusPushAtRef.current >= 1500;
+      const heartbeatDue = now - lastStatusPushAtRef.current >= 1000;
 
       // Refresh hold timestamp whenever live candle anchor is actively confirmed so transient hold window stays accurate
       if (
@@ -666,6 +668,7 @@ export default function App() {
         typeof (trackSettings as { displaySurface?: unknown }).displaySurface === 'string'
           ? String((trackSettings as { displaySurface?: string }).displaySurface)
           : 'window';
+      displaySurfaceRef.current = displaySurface;
 
       console.info('[ChartPulse:Diag] Captura iniciada (Timeframe M1)', {
         sessionId: newSessionId,
@@ -790,17 +793,48 @@ export default function App() {
       if (ok && health) {
         if (!supportsStatus) {
           console.warn(
-            `[ChartPulse:Diag] Agente Windows instalado (${health.version ?? 'desconhecida'}) não suporta /overlay/status (AGUARDANDO). Recompile e reinstale ChartPulseOverlaySetup.exe v1.3.0+.`
+            `[ChartPulse:Diag] Agente Windows instalado (${health.version ?? 'desconhecida'}) não suporta /overlay/status (AGUARDANDO). Recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.1+).`
           );
+        }
+        // Auto-resync active browser session if Windows overlay restarted or missed /overlay/session
+        const activeSid = sessionIdRef.current;
+        if (
+          isActiveRef.current &&
+          activeSid &&
+          (!health.active || health.operationalStatus === 'NONE')
+        ) {
+          void notifyLocalOverlaySession(activeSid, displaySurfaceRef.current).then((synced) => {
+            if (!synced || !isActiveRef.current || sessionIdRef.current !== activeSid) return;
+            if (lastOperationalStatusRef.current) {
+              void pushLocalOverlayStatus(activeSid, lastOperationalStatusRef.current);
+            }
+            if (lastPriceLineRef.current) {
+              void pushLocalOverlayPrice(activeSid, lastPriceLineRef.current);
+            }
+            if (lastLiveCandleRef.current) {
+              void pushLocalOverlayCandle(activeSid, lastLiveCandleRef.current);
+            }
+            if (lastSignalRef.current) {
+              void pushLocalOverlaySignal(activeSid, lastSignalRef.current);
+            }
+          });
         }
         console.info('[ChartPulse:Diag] Agente Windows', {
           version: health.version,
+          active: health.active,
+          overlayVisible: health.overlayVisible,
+          overlayBounds: health.overlayBounds,
+          targetBounds: health.targetBounds,
+          targetWindowTitle: health.targetWindowTitle,
           priceLineSupported: health.priceLineSupported,
           liveCandleSupported: health.liveCandleSupported,
           operationalStatusSupported: health.operationalStatusSupported,
           hasStatusAnchor: health.hasStatusAnchor,
+          hasLiveCandle: health.hasLiveCandle,
+          hasPriceLine: health.hasPriceLine,
           operationalStatus: health.operationalStatus,
-          targetBounds: health.targetBounds,
+          lastStatusAnchorX: health.lastStatusAnchorX,
+          lastStatusAnchorY: health.lastStatusAnchorY,
           priceLineUpdates: health.priceLineUpdates,
           liveCandleUpdates: health.liveCandleUpdates,
           statusUpdates: health.statusUpdates,
@@ -896,11 +930,11 @@ export default function App() {
             {overlayStatus === 'connected' ? (
               overlayAgentOutdated ? (
                 <span className="text-amber-400">
-                  Overlay Windows desatualizado ({overlayAgentVersion ?? 'v1.2.0'}) — recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.0+) para exibir AGUARDANDO acima da vela na corretora.
+                  Overlay Windows desatualizado ({overlayAgentVersion ?? 'v1.2.0'}) — recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.1+) para exibir AGUARDANDO acima da vela na corretora.
                 </span>
               ) : (
                 <span className="text-emerald-400">
-                  Overlay Windows: conectado em segundo plano ({overlayAgentVersion ?? 'v1.3.0'})
+                  Overlay Windows: conectado em segundo plano ({overlayAgentVersion ?? 'v1.3.1'})
                 </span>
               )
             ) : overlayStatus === 'checking' ? (
