@@ -66,17 +66,17 @@ function classifyPixel(
   bg: { r: number; g: number; b: number }
 ): 'BULL' | 'BEAR' | 'MONO' | null {
   const bgDiff = colorDist(r, g, b, bg.r, bg.g, bg.b);
-  if (bgDiff < 42) return null;
+  if (bgDiff < 36) return null;
 
   const maxC = Math.max(r, g, b);
   const minC = Math.min(r, g, b);
   const saturation = maxC - minC;
 
-  if (saturation >= 28) {
-    if ((g >= r + 14 && g >= b - 10) || (b >= r + 24 && g >= r + 12)) {
+  if (saturation >= 24) {
+    if ((g >= r + 12 && g >= b - 12) || (b >= r + 20 && g >= r + 10)) {
       return 'BULL';
     }
-    if (r >= g + 16 && r >= b + 6) {
+    if (r >= g + 14 && r >= b + 4) {
       return 'BEAR';
     }
   }
@@ -272,9 +272,11 @@ export function detectLiveMovingCandle(
     let heightSum = 0;
     let clusterBull = 0;
     let clusterBear = 0;
+    let clusterMono = 0;
     for (const col of c) {
       clusterBull += col.bull;
       clusterBear += col.bear;
+      clusterMono += col.mono;
       if (col.minPy < minTop) minTop = col.minPy;
       if (col.minPy > maxTop) maxTop = col.minPy;
       if (col.maxPy < minBot) minBot = col.maxPy;
@@ -288,6 +290,18 @@ export function detectLiveMovingCandle(
 
     // Exclude thin horizontal line streaks
     if (spanPx >= 18 && avgHeight <= 2.2) {
+      return false;
+    }
+
+    // Exclude monochrome horizontal countdown/timer/text labels (e.g., "00:42") to the right of candles
+    if (
+      clusterBull === 0 &&
+      clusterBear === 0 &&
+      clusterMono > 0 &&
+      spanPx >= avgHeight * 1.35 &&
+      avgHeight <= 15 &&
+      c.length >= 4
+    ) {
       return false;
     }
 
@@ -369,6 +383,10 @@ export function detectLiveMovingCandle(
     direction = 'BEAR';
     closePy = bodyBottom;
     confidence = bearTotal >= 3 ? 0.8 : 0.74;
+  } else if (bullTotal + bearTotal >= 2) {
+    direction = 'NEUTRAL';
+    closePy = Math.round((bodyTop + bodyBottom) / 2);
+    confidence = 0.73;
   } else if (monoTotal >= 4 && bodyBottom - bodyTop <= 4) {
     closePy = Math.round((bodyTop + bodyBottom) / 2);
     confidence = 0.72;
@@ -385,7 +403,7 @@ export function detectLiveMovingCandle(
     verifiedPriceLine.confidence >= 0.64
   ) {
     const linePy = verifiedPriceLine.y * height;
-    if (linePy >= topPy - 24 && linePy <= bottomPy + 24) {
+    if (linePy >= topPy - 42 && linePy <= bottomPy + 42) {
       resolvedNormY = verifiedPriceLine.y;
       confidence = Math.max(confidence, verifiedPriceLine.confidence);
     }

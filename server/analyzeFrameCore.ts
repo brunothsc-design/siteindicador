@@ -44,6 +44,47 @@ function getAiClient(): GoogleGenAI | null {
 
 let rateLimitCooldownUntil = 0;
 let consecutiveErrors = 0;
+const sessionLastCallMs = new Map<string, number>();
+const SERVER_MIN_SESSION_INTERVAL_MS = 1500;
+const MAX_IMAGE_BASE64_CHARS = 5_500_000;
+
+export function sanitizeSecretFromText(raw: string): string {
+  let clean = raw ?? '';
+  const activeKey = getConfiguredApiKey();
+  if (activeKey && activeKey.length >= 8) {
+    clean = clean.split(activeKey).join('[REDACTED]');
+  }
+  clean = clean.replace(/AIza[0-9A-Za-z_-]{16,}/g, '[REDACTED]');
+  return clean;
+}
+
+export function isAuthorizedSameOriginRequest(
+  originHeader: string | null | undefined,
+  hostHeader: string | null | undefined,
+  secFetchSite?: string | null | undefined
+): boolean {
+  if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
+    return false;
+  }
+  if (!originHeader || !originHeader.trim()) {
+    return true;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(originHeader.trim());
+  } catch {
+    return false;
+  }
+  const originHost = parsed.host.toLowerCase();
+  const originName = parsed.hostname.toLowerCase();
+  if (originName === 'localhost' || originName === '127.0.0.1') {
+    return true;
+  }
+  if (hostHeader && hostHeader.trim().length > 0) {
+    return originHost === hostHeader.trim().toLowerCase();
+  }
+  return false;
+}
 
 export function emptyAnalyzeResponse(
   ok: boolean,
@@ -77,7 +118,7 @@ export function classifyGeminiUpstreamError(err: unknown): {
   httpStatus: number;
   userMessage: string;
 } {
-  const rawMsg = err instanceof Error ? err.message : String(err ?? '');
+  const rawMsg = sanitizeSecretFromText(err instanceof Error ? err.message : String(err ?? ''));
   const msg = rawMsg.toLowerCase();
   const status =
     typeof err === 'object' && err !== null && 'status' in err
@@ -218,15 +259,45 @@ export async function executeGeminiFrameAnalysis(
     };
   }
 
+  if (cleanBase64.length > MAX_IMAGE_BASE64_CHARS) {
+    return {
+      status: 413,
+      body: emptyAnalyzeResponse(false, {
+        error: 'Frame de imagem excede o limite permitido.',
+      }),
+    };
+  }
+
   const ai = getAiClient();
   if (!ai) {
     return {
       status: 503,
       body: emptyAnalyzeResponse(false, {
         error:
-          'Chave da API Gemini não configurada. Defina a variável de ambiente GEMINI_API_KEY nas configurações do servidor (Netlify).',
+          'Chave da API Gemini não configurada. Defina a variável de ambiente GEMINI_API_KEY nas configurações do servidor.',
       }),
     };
+  }
+
+  const sid = typeof request?.sessionId === 'string' ? request.sessionId.trim() : '';
+  if (sid) {
+    const prevCallAt = sessionLastCallMs.get(sid) ?? 0;
+    const elapsed = now - prevCallAt;
+    if (elapsed < SERVER_MIN_SESSION_INTERVAL_MS) {
+      return {
+        status: 429,
+        body: emptyAnalyzeResponse(false, {
+          rateLimited: true,
+          retryAfterMs: SERVER_MIN_SESSION_INTERVAL_MS - elapsed,
+          error: 'Intervalo mínimo entre análises atingido.',
+        }),
+      };
+    }
+    if (sessionLastCallMs.size > 256) {
+      const oldest = sessionLastCallMs.keys().next().value;
+      if (oldest) sessionLastCallMs.delete(oldest);
+    }
+    sessionLastCallMs.set(sid, now);
   }
 
   const localBounds = request?.chartBounds ?? null;

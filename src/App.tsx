@@ -34,11 +34,11 @@ import type {
   VisualSignal,
 } from './types/signals.ts';
 
-const CAPTURE_POLL_MS = 2200;
+const CAPTURE_POLL_MS = 1500;
 const PRICE_POLL_MS = 250;
-const MIN_API_INTERVAL_MS = 4500;
+const MIN_API_INTERVAL_MS = 1500;
 const SIGNAL_TTL_MS = 18000;
-const OVERLAY_HEALTH_POLL_MS = 5000;
+const OVERLAY_HEALTH_POLL_MS = 2500;
 
 function priceLineChanged(prev: PriceLine | null, next: PriceLine | null): boolean {
   if (prev === null && next === null) return false;
@@ -126,6 +126,15 @@ export default function App() {
   const lastOperationalStatusRef = useRef<OperationalStatusState | null>(null);
   const lastStatusPushAtRef = useRef(0);
   const lastChartBoundsRef = useRef<ChartBounds | null>(null);
+  const geminiChartBoundsRef = useRef<ChartBounds | null>(null);
+  const geminiVisionCandleRef = useRef<{
+    bounds: ChartBounds | null;
+    x: number;
+    y: number;
+    relX: number;
+    relY: number;
+    updatedAt: number;
+  } | null>(null);
   const lastDiagStateRef = useRef<string>('');
   const localAgentReadyRef = useRef(false);
   const displaySurfaceRef = useRef<string>('window');
@@ -175,6 +184,8 @@ export default function App() {
     lastOperationalStatusRef.current = null;
     lastStatusPushAtRef.current = 0;
     lastChartBoundsRef.current = null;
+    geminiChartBoundsRef.current = null;
+    geminiVisionCandleRef.current = null;
     lastDiagStateRef.current = '';
     localAgentReadyRef.current = false;
     displaySurfaceRef.current = 'window';
@@ -331,9 +342,19 @@ export default function App() {
       lastSignatureRef.current
     );
 
-    const nextPrice = local.chartDetected ? local.priceLine : null;
-    const changed = priceLineChanged(lastPriceLineRef.current, nextPrice);
     const now = Date.now();
+    const recentGeminiCandle =
+      geminiVisionCandleRef.current && now - geminiVisionCandleRef.current.updatedAt <= 6000
+        ? geminiVisionCandleRef.current
+        : null;
+    const effectiveChartDetected = local.chartDetected || Boolean(geminiChartBoundsRef.current);
+    const effectiveBounds =
+      (local.chartDetected ? local.chartBounds : null) ??
+      geminiChartBoundsRef.current ??
+      lastChartBoundsRef.current;
+
+    const nextPrice = effectiveChartDetected ? local.priceLine : null;
+    const changed = priceLineChanged(lastPriceLineRef.current, nextPrice);
     const heartbeatDue = nextPrice !== null && now - lastPricePushAtRef.current >= 1500;
 
     if (changed || heartbeatDue) {
@@ -361,12 +382,28 @@ export default function App() {
       imgData.data,
       targetW,
       targetH,
-      local.chartBounds,
+      effectiveBounds,
       nextPrice,
-      local.chartDetected
+      effectiveChartDetected
     );
-    const nextCandle = candleDetect.candle;
-    const candleFailureReason: CandleDetectionFailureReason | null = candleDetect.reason;
+    let nextCandle: LiveCandleTracker | null = candleDetect.candle;
+    if (!nextCandle && effectiveChartDetected && recentGeminiCandle) {
+      nextCandle = {
+        x: recentGeminiCandle.x,
+        y: recentGeminiCandle.y,
+        chartRelativeX: recentGeminiCandle.relX,
+        chartRelativeY: recentGeminiCandle.relY,
+        topY: Math.max(0.02, recentGeminiCandle.y - 0.02),
+        bottomY: Math.min(0.98, recentGeminiCandle.y + 0.02),
+        direction: 'NEUTRAL',
+        chartBounds: recentGeminiCandle.bounds ?? effectiveBounds,
+        confidence: 0.72,
+        updatedAt: now,
+      };
+    }
+    const candleFailureReason: CandleDetectionFailureReason | null = nextCandle
+      ? null
+      : candleDetect.reason;
     const candleChanged = liveCandleChanged(lastLiveCandleRef.current, nextCandle);
     const candleHeartbeatDue = nextCandle !== null && now - lastLiveCandlePushAtRef.current >= 1500;
 
@@ -390,32 +427,32 @@ export default function App() {
       }
     }
 
-    if (local.chartDetected && local.chartBounds) {
-      lastChartBoundsRef.current = local.chartBounds;
+    if (effectiveChartDetected && effectiveBounds) {
+      lastChartBoundsRef.current = effectiveBounds;
     }
 
     // Keep permanent operational status anchored directly above the detected forming candle without flicker
     syncOperationalStatusState(
-      local.chartBounds ?? lastChartBoundsRef.current,
+      effectiveBounds ?? lastChartBoundsRef.current,
       false,
       nextCandle,
-      local.chartDetected
+      effectiveChartDetected
     );
 
-    const diagKey = `${local.chartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}|${candleFailureReason ?? 'ok'}`;
+    const diagKey = `${effectiveChartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}|${candleFailureReason ?? 'ok'}`;
     if (diagKey !== lastDiagStateRef.current) {
       lastDiagStateRef.current = diagKey;
       if (!lastOperationalStatusRef.current?.anchor && candleFailureReason) {
         console.warn('[ChartPulse:Diag] AGUARDANDO oculto — vela M1 não identificada', {
           reason: candleFailureReason,
-          chartDetected: local.chartDetected,
-          chartBounds: local.chartBounds,
+          chartDetected: effectiveChartDetected,
+          chartBounds: effectiveBounds,
         });
       }
       console.info('[ChartPulse:Diag]', {
         frame: `${targetW}x${targetH}`,
-        chartDetected: local.chartDetected,
-        chartBounds: local.chartBounds,
+        chartDetected: effectiveChartDetected,
+        chartBounds: effectiveBounds,
         operationalStatus: lastOperationalStatusRef.current?.status ?? null,
         statusAnchor: lastOperationalStatusRef.current?.anchor ?? null,
         candleFailureReason,
@@ -473,14 +510,7 @@ export default function App() {
       lastSignatureRef.current
     );
 
-    // Local gating: skip Gemini API if no candlestick chart is visible or frame has not meaningfully changed
-    if (!local.chartDetected) {
-      return;
-    }
-    if (lastSignatureRef.current !== null && local.diffScore < 0.0085) {
-      return;
-    }
-
+    // Continuous Gemini analysis without artificial credit-saving skips
     lastSignatureRef.current = local.signature;
     lastApiCallAtRef.current = now;
 
@@ -499,7 +529,7 @@ export default function App() {
         body: JSON.stringify({
           imageBase64: dataUrl,
           mimeType: 'image/jpeg',
-          chartBounds: local.chartBounds,
+          chartBounds: local.chartBounds ?? geminiChartBoundsRef.current,
           sessionId: sessionAtSend,
           lastSignal: lastSignalRef.current
             ? {
@@ -532,6 +562,23 @@ export default function App() {
       }
 
       setErrorMessage(null);
+
+      if (result.chartDetected) {
+        if (result.chartBounds) {
+          geminiChartBoundsRef.current = result.chartBounds;
+        }
+        geminiVisionCandleRef.current = {
+          bounds: result.chartBounds ?? geminiChartBoundsRef.current,
+          x: result.candleX,
+          y: result.candleY,
+          relX: result.chartRelativeX,
+          relY: result.chartRelativeY,
+          updatedAt: Date.now(),
+        };
+      } else if (!local.chartDetected) {
+        geminiChartBoundsRef.current = null;
+        geminiVisionCandleRef.current = null;
+      }
 
       const hasValidSignal =
         (result.signal === 'COMPRA' || result.signal === 'VENDA') &&
@@ -634,7 +681,7 @@ export default function App() {
       }
 
       if (typeof videoTrack.applyConstraints === 'function') {
-        void videoTrack.applyConstraints({ frameRate: { ideal: 3, max: 5 } }).catch(() => {});
+        void videoTrack.applyConstraints({ frameRate: { ideal: 10, max: 15 } }).catch(() => {});
       }
 
       const newSessionId = `cp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -785,15 +832,16 @@ export default function App() {
       const ok = Boolean(health?.ok);
       localAgentReadyRef.current = ok;
       const supportsStatus = Boolean(health?.operationalStatusSupported);
+      const isCurrentAgent = Boolean(supportsStatus && health?.version === '1.3.2');
       if (!cancelled) {
         setOverlayStatus(ok ? 'connected' : 'disconnected');
-        setOverlayAgentOutdated(ok && !supportsStatus);
+        setOverlayAgentOutdated(ok && !isCurrentAgent);
         setOverlayAgentVersion(health?.version ?? null);
       }
       if (ok && health) {
-        if (!supportsStatus) {
+        if (!isCurrentAgent) {
           console.warn(
-            `[ChartPulse:Diag] Agente Windows instalado (${health.version ?? 'desconhecida'}) não suporta /overlay/status (AGUARDANDO). Recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.1+).`
+            `[ChartPulse:Diag] Agente Windows instalado (${health.version ?? 'desconhecida'}) está desatualizado. Recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.2).`
           );
         }
         // Auto-resync active browser session if Windows overlay restarted or missed /overlay/session
@@ -930,11 +978,11 @@ export default function App() {
             {overlayStatus === 'connected' ? (
               overlayAgentOutdated ? (
                 <span className="text-amber-400">
-                  Overlay Windows desatualizado ({overlayAgentVersion ?? 'v1.2.0'}) — recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.1+) para exibir AGUARDANDO acima da vela na corretora.
+                  Overlay Windows desatualizado ({overlayAgentVersion ?? 'v1.2.0'}) — recompile e reinstale ChartPulseOverlaySetup.exe (v1.3.2) para exibir os indicadores em tempo real sobre a corretora.
                 </span>
               ) : (
                 <span className="text-emerald-400">
-                  Overlay Windows: conectado em segundo plano ({overlayAgentVersion ?? 'v1.3.1'})
+                  Overlay Windows: conectado em segundo plano ({overlayAgentVersion ?? 'v1.3.2'})
                 </span>
               )
             ) : overlayStatus === 'checking' ? (

@@ -12,8 +12,8 @@ export interface LocalFrameDigest {
   signature: Float32Array;
 }
 
-const GRID_W = 192;
-const GRID_H = 108;
+const GRID_W = 240;
+const GRID_H = 135;
 
 /**
  * Estimates dominant canvas background RGB from the interior region of the frame
@@ -126,13 +126,13 @@ export function processFrameLocally(
         const minC = Math.min(r, g, b);
         const saturation = maxC - minC;
 
-        // Supports green/teal/lime/cyan bullish and red/coral/orange/magenta bearish palettes
+        // Supports green/teal/lime/cyan bullish and red/coral/orange/magenta bearish palettes (including thin anti-aliased M1 candles)
         const isChromaCandle =
-          bgDiff >= 48 &&
-          saturation >= 32 &&
-          ((g >= r + 14 && g >= b - 10) || // green / teal / lime
-            (r >= g + 16 && r >= b + 6) || // red / coral / orange
-            (b >= r + 24 && g >= r + 12)); // cyan / blue candles
+          bgDiff >= 38 &&
+          saturation >= 26 &&
+          ((g >= r + 12 && g >= b - 12) || // green / teal / lime
+            (r >= g + 14 && r >= b + 4) || // red / coral / orange
+            (b >= r + 20 && g >= r + 10)); // cyan / blue candles
 
         if (isChromaCandle) {
           chromaCandleMask[sigIdx] = 1;
@@ -261,36 +261,49 @@ export function processFrameLocally(
     const scanEndX = Math.min(width - 3, Math.ceil((rightCandleNormX + 0.065) * width));
     const scanTopY = Math.max(2, Math.floor(top * height));
     const scanBotY = Math.min(height - 3, Math.ceil((Math.min(1, (maxGy + 1) / GRID_H + padY)) * height));
-    const maxBtnSpan = Math.max(24, Math.round(width * 0.04));
+    const maxBtnSpan = Math.max(18, Math.round(width * 0.032));
 
     for (let px = scanStartX; px <= scanEndX; px++) {
       let colColoredHits = 0;
-      let hitMinPy = height;
-      let hitMaxPy = -1;
+      let segStartPy = -1;
+      const segMidRows: number[] = [];
+
       for (let py = scanTopY; py <= scanBotY; py++) {
         const idx = (py * width + px) * 4;
         const k = classifyCandlePixel(rgba[idx], rgba[idx + 1], rgba[idx + 2], bg);
         if (k === 'BULL' || k === 'BEAR') {
           colColoredHits++;
-          if (py < hitMinPy) hitMinPy = py;
-          if (py > hitMaxPy) hitMaxPy = py;
+          if (segStartPy < 0) segStartPy = py;
+        } else if (segStartPy >= 0) {
+          if (py - segStartPy >= 2) {
+            segMidRows.push(Math.floor((segStartPy + py - 1) / 2));
+          }
+          segStartPy = -1;
         }
       }
-      if (colColoredHits >= 2) {
-        // Verify it is not a wide solid UI button/panel on the right
-        const midPy = Math.round((hitMinPy + hitMaxPy) / 2);
-        let hSpan = 1;
-        for (let lx = px - 1; lx >= Math.max(0, px - maxBtnSpan); lx--) {
-          const lIdx = (midPy * width + lx) * 4;
-          if (classifyCandlePixel(rgba[lIdx], rgba[lIdx + 1], rgba[lIdx + 2], bg) !== null) hSpan++;
-          else break;
+      if (segStartPy >= 0 && scanBotY - segStartPy + 1 >= 2) {
+        segMidRows.push(Math.floor((segStartPy + scanBotY) / 2));
+      }
+
+      if (colColoredHits >= 2 && segMidRows.length > 0) {
+        let maxHSpan = 0;
+        for (let s = 0; s < segMidRows.length; s++) {
+          const midPy = segMidRows[s];
+          let hSpan = 1;
+          for (let lx = px - 1; lx >= Math.max(0, px - maxBtnSpan); lx--) {
+            const lIdx = (midPy * width + lx) * 4;
+            if (classifyCandlePixel(rgba[lIdx], rgba[lIdx + 1], rgba[lIdx + 2], bg) !== null) hSpan++;
+            else break;
+          }
+          for (let rx = px + 1; rx <= Math.min(width - 1, px + maxBtnSpan); rx++) {
+            const rIdx = (midPy * width + rx) * 4;
+            if (classifyCandlePixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg) !== null) hSpan++;
+            else break;
+          }
+          if (hSpan > maxHSpan) maxHSpan = hSpan;
+          if (maxHSpan >= maxBtnSpan) break;
         }
-        for (let rx = px + 1; rx <= Math.min(width - 1, px + maxBtnSpan); rx++) {
-          const rIdx = (midPy * width + rx) * 4;
-          if (classifyCandlePixel(rgba[rIdx], rgba[rIdx + 1], rgba[rIdx + 2], bg) !== null) hSpan++;
-          else break;
-        }
-        if (hSpan < maxBtnSpan) {
+        if (maxHSpan < maxBtnSpan) {
           rightCandleNormX = Math.max(rightCandleNormX, (px + 1) / width);
         }
       }
@@ -340,17 +353,17 @@ function classifyCandlePixel(
   bg: { r: number; g: number; b: number }
 ): 'BULL' | 'BEAR' | 'MONO' | null {
   const bgDiff = colorDist(r, g, b, bg.r, bg.g, bg.b);
-  if (bgDiff < 42) return null;
+  if (bgDiff < 36) return null;
 
   const maxC = Math.max(r, g, b);
   const minC = Math.min(r, g, b);
   const saturation = maxC - minC;
 
-  if (saturation >= 28) {
-    if ((g >= r + 14 && g >= b - 10) || (b >= r + 24 && g >= r + 12)) {
+  if (saturation >= 24) {
+    if ((g >= r + 12 && g >= b - 12) || (b >= r + 20 && g >= r + 10)) {
       return 'BULL';
     }
-    if (r >= g + 16 && r >= b + 6) {
+    if (r >= g + 14 && r >= b + 4) {
       return 'BEAR';
     }
   }

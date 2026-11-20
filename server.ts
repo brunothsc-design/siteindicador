@@ -7,6 +7,7 @@ import { createServer as createViteServer } from 'vite';
 import {
   emptyAnalyzeResponse,
   executeGeminiFrameAnalysis,
+  isAuthorizedSameOriginRequest,
 } from './server/analyzeFrameCore.ts';
 import { computeCandleStatusAnchor } from './src/engine/operationalStatus.ts';
 import { isSignalConfidenceValid } from './src/config/signalConfig.ts';
@@ -53,8 +54,13 @@ function broadcastOverlayState(): void {
 
 async function startServer(): Promise<void> {
   const app = express();
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     res.setHeader('Permissions-Policy', 'display-capture=(self)');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (req.path.startsWith('/api/')) {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     next();
   });
   app.use(express.json({ limit: '6mb' }));
@@ -271,6 +277,17 @@ async function startServer(): Promise<void> {
   });
 
   app.post('/api/analyze-frame', async (req: Request, res: Response) => {
+    if (
+      !isAuthorizedSameOriginRequest(
+        req.get('origin'),
+        req.get('host'),
+        req.get('sec-fetch-site')
+      )
+    ) {
+      res.status(403).json(emptyAnalyzeResponse(false, { error: 'Origem não autorizada.' }));
+      return;
+    }
+
     const body = req.body as Partial<AnalyzeFrameRequest>;
     const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
 

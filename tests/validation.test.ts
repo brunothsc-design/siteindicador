@@ -21,6 +21,8 @@ import {
   applySignalPrecisionFilter,
   classifyGeminiUpstreamError,
   executeGeminiFrameAnalysis,
+  isAuthorizedSameOriginRequest,
+  sanitizeSecretFromText,
 } from '../server/analyzeFrameCore.ts';
 import {
   PRODUCTION_MIN_SIGNAL_CONFIDENCE,
@@ -1104,7 +1106,7 @@ describe('ChartPulse AI — Additional Live Forming Candle Tracking', () => {
     assert.match(cs, /UpdateLiveCandle/);
     assert.match(cs, /HasLiveCandle/);
     assert.match(cs, /liveCandleSupported/);
-    assert.match(cs, /\\"version\\":\\"1\.(?:2|3)\.(?:0|1)\\"/);
+    assert.match(cs, /\\"version\\":\\"1\.3\.2\\"/);
     assert.match(cs, /"\/overlay\/price"/);
     assert.match(cs, /"\/overlay\/signal"/);
   });
@@ -1574,7 +1576,12 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
       path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
       'utf8'
     );
-    assert.match(cs, /\\"version\\":\\"1\.3\.1\\"/);
+    assert.match(cs, /\\"version\\":\\"1\.3\.2\\"/);
+    assert.match(cs, /\\"buildId\\":\\"2026-11-20-ulw\\"/);
+    assert.match(cs, /UpdateLayeredWindow/);
+    assert.match(cs, /DWMWA_CLOAKED/);
+    assert.match(cs, /OverlayApplicationContext/);
+    assert.match(cs, /PresentLayeredFrame/);
     assert.match(cs, /operationalStatusSupported/);
     assert.match(cs, /hasStatusAnchor/);
     assert.match(cs, /"\/overlay\/status"/);
@@ -1764,6 +1771,415 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     assert.ok(anchor.y < detected.candle.topY);
   });
 });
+
+describe('ChartPulse AI — Gemini API Key Protection & Bundle Isolation', () => {
+  it('sanitizes AIza patterns and active GEMINI_API_KEY values from upstream error strings', () => {
+    const previousKey = process.env.GEMINI_API_KEY;
+    try {
+      process.env.GEMINI_API_KEY = 'custom_secret_token_987654321';
+      const msg1 = sanitizeSecretFromText('Upstream failed for key custom_secret_token_987654321 at endpoint');
+      assert.equal(msg1.includes('custom_secret_token_987654321'), false);
+      assert.match(msg1, /\[REDACTED\]/);
+
+      const msg2 = sanitizeSecretFromText('Invalid API key AIzaSyD_example_1234567890abcdef');
+      assert.equal(msg2.includes('AIzaSyD_example_1234567890abcdef'), false);
+      assert.match(msg2, /\[REDACTED\]/);
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env.GEMINI_API_KEY;
+      } else {
+        process.env.GEMINI_API_KEY = previousKey;
+      }
+    }
+  });
+
+  it('rejects cross-site origins and allows same-origin, localhost, or origin-less server requests', () => {
+    assert.equal(isAuthorizedSameOriginRequest('https://evil.com', 'chartpulse.netlify.app', null), false);
+    assert.equal(isAuthorizedSameOriginRequest('https://chartpulse.netlify.app', 'chartpulse.netlify.app', 'cross-site'), false);
+    assert.equal(isAuthorizedSameOriginRequest('https://chartpulse.netlify.app', 'chartpulse.netlify.app', 'same-origin'), true);
+    assert.equal(isAuthorizedSameOriginRequest('http://localhost:3000', 'localhost:3000', 'same-origin'), true);
+    assert.equal(isAuthorizedSameOriginRequest('http://127.0.0.1:3000', '127.0.0.1:3000', 'same-origin'), true);
+    assert.equal(isAuthorizedSameOriginRequest(undefined, 'chartpulse.netlify.app', undefined), true);
+  });
+
+  it('returns 403 on cross-origin requests to /.netlify/functions/analyze-frame and 503 safely when key is absent on same origin', async () => {
+    const evilReq = new Request('https://example.netlify.app/api/analyze-frame', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://evil.com',
+        Host: 'example.netlify.app',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ imageBase64: 'AAAA', sessionId: 'sec-test-1' }),
+    });
+    const evilRes = await netlifyAnalyzeHandler(evilReq);
+    assert.equal(evilRes.status, 403);
+    assert.equal(evilRes.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.equal(evilRes.headers.get('Referrer-Policy'), 'no-referrer');
+
+    const previousKey = process.env.GEMINI_API_KEY;
+    try {
+      delete process.env.GEMINI_API_KEY;
+      const sameOriginReq = new Request('https://example.netlify.app/api/analyze-frame', {
+        method: 'POST',
+        headers: {
+          Origin: 'https://example.netlify.app',
+          Host: 'example.netlify.app',
+          'Sec-Fetch-Site': 'same-origin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ imageBase64: 'A'.repeat(120), sessionId: 'sec-test-2' }),
+      });
+      const res = await netlifyAnalyzeHandler(sameOriginReq);
+      assert.equal(res.status, 503);
+      assert.equal(res.headers.get('X-Content-Type-Options'), 'nosniff');
+      assert.equal(res.headers.get('Referrer-Policy'), 'no-referrer');
+      const body = (await res.json()) as { ok: boolean; error?: string };
+      assert.equal(body.ok, false);
+      assert.equal((body.error ?? '').includes('AIza'), false);
+    } finally {
+      if (previousKey !== undefined) {
+        process.env.GEMINI_API_KEY = previousKey;
+      }
+    }
+  });
+
+  it('keeps GEMINI_API_KEY, AIza prefixes, and @google/genai completely out of src/, vite.config.ts, and built dist/assets', () => {
+    const forbiddenPatterns = [/GEMINI_API_KEY/, /AIza[0-9A-Za-z_-]{8,}/, /@google\/genai/];
+
+    const walkFiles = (dir: string): string[] => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const results: string[] = [];
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...walkFiles(full));
+        } else {
+          results.push(full);
+        }
+      }
+      return results;
+    };
+
+    const srcFiles = walkFiles(path.resolve('src')).filter((f) => /\.(ts|tsx|js|jsx|html)$/.test(f));
+    assert.ok(srcFiles.length > 0);
+    for (const file of srcFiles) {
+      const content = fs.readFileSync(file, 'utf8');
+      for (const pattern of forbiddenPatterns) {
+        assert.doesNotMatch(content, pattern, `Unexpected secret/SDK match in client file ${file}`);
+      }
+    }
+
+    const viteConfig = fs.readFileSync(path.resolve('vite.config.ts'), 'utf8');
+    for (const pattern of forbiddenPatterns) {
+      assert.doesNotMatch(viteConfig, pattern, 'Unexpected GEMINI_API_KEY/SDK injection in vite.config.ts');
+    }
+
+    const distAssetsDir = path.resolve('dist/assets');
+    assert.equal(fs.existsSync(distAssetsDir), true, 'dist/assets must exist (run npm run build before npm test)');
+    const bundleFiles = walkFiles(distAssetsDir).filter((f) => f.endsWith('.js'));
+    assert.ok(bundleFiles.length > 0);
+    for (const bundle of bundleFiles) {
+      const content = fs.readFileSync(bundle, 'utf8');
+      for (const pattern of forbiddenPatterns) {
+        assert.doesNotMatch(content, pattern, `Unexpected secret/SDK leakage in built bundle ${bundle}`);
+      }
+    }
+  });
+
+  it('protects local .env files via .gitignore and keeps .env.example free of real keys', () => {
+    const gitignore = fs.readFileSync(path.resolve('.gitignore'), 'utf8');
+    assert.match(gitignore, /^\.env\*$/m);
+    assert.match(gitignore, /^!\.env\.example$/m);
+
+    const envExample = fs.readFileSync(path.resolve('.env.example'), 'utf8');
+    assert.match(envExample, /^GEMINI_API_KEY="MY_GEMINI_API_KEY"$/m);
+    assert.doesNotMatch(envExample, /AIza[0-9A-Za-z_-]{8,}/);
+  });
+});
+
+describe('ChartPulse AI — 8-Stage Real-Time Broker Overlay Pipeline & Non-Economy Verification', () => {
+  it('Stage 1 & 2: detects zoomed-out anti-aliased thin M1 candles and ignores trailing monochrome countdown labels', () => {
+    const width = 1280;
+    const height = 720;
+    const bg: [number, number, number] = [19, 23, 34];
+    const thinBull: [number, number, number] = [28, 126, 92]; // anti-aliased dim green M1 candle
+    const thinBear: [number, number, number] = [132, 48, 62]; // anti-aliased dim red M1 candle
+
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, y0); y <= Math.min(height - 1, y1); y++) {
+        for (let x = Math.max(0, x0); x <= Math.min(width - 1, x1); x++) {
+          const idx = (y * width + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+
+    // Draw 48 zoomed-out 3px wide M1 candles
+    let activeCandleX = 0;
+    for (let i = 0; i < 48; i++) {
+      const cx = 130 + i * 16;
+      activeCandleX = cx;
+      const isBull = i % 3 !== 0;
+      const c = isBull ? thinBull : thinBear;
+      const top = i === 47 ? 248 : 260 + ((i * 7) % 50);
+      const bot = i === 47 ? 286 : top + 18 + (i % 10);
+      paint(cx + 1, top - 5, cx + 1, bot + 5, c);
+      paint(cx, top, cx + 2, bot, c);
+    }
+
+    // Monochrome horizontal countdown text badge ("00:34") to the right of the forming candle inside chartBounds
+    const countdownX0 = activeCandleX + 12;
+    paint(countdownX0, 265, countdownX0 + 22, 274, [210, 215, 224]);
+
+    const digest = processFrameLocally(rgba, width, height, null);
+    assert.equal(digest.chartDetected, true, 'Stage 1: Must recognize M1 broker chart frame');
+    assert.ok(digest.chartBounds !== null);
+
+    const detected = detectLiveMovingCandleWithReason(
+      rgba,
+      width,
+      height,
+      digest.chartBounds,
+      digest.priceLine,
+      digest.chartDetected
+    );
+    assert.equal(detected.reason, null);
+    assert.ok(detected.candle !== null, 'Stage 2: Must detect forming M1 candle');
+    assert.ok(
+      Math.abs(detected.candle.x - (activeCandleX + 1) / width) <= 0.015,
+      `Stage 2: Must anchor on colored candle at x=${activeCandleX + 1}, not countdown label (got ${detected.candle.x * width})`
+    );
+
+    // Stage 3: Coordinate calculation strictly above forming candle & inside chartBounds
+    const anchor = computeCandleStatusAnchor(detected.candle, digest.chartBounds, 1700000000000);
+    assert.ok(anchor !== null, 'Stage 3: Must calculate valid anchor above forming candle');
+    assert.ok(anchor.y < detected.candle.topY, 'Stage 3: Anchor must be strictly above candle topY');
+    assert.ok(anchor.x >= digest.chartBounds.x && anchor.x <= digest.chartBounds.x + digest.chartBounds.width);
+    assert.ok(anchor.y >= digest.chartBounds.y && anchor.y <= digest.chartBounds.y + digest.chartBounds.height);
+  });
+
+  it('Stage 4: enforces continuous Gemini calls without artificial economy skips while keeping 1500ms stability limit', () => {
+    const appSrc = fs.readFileSync(path.resolve('src/App.tsx'), 'utf8');
+    assert.match(appSrc, /const CAPTURE_POLL_MS = 1500;/);
+    assert.match(appSrc, /const MIN_API_INTERVAL_MS = 1500;/);
+    assert.doesNotMatch(appSrc, /diffScore\s*<\s*0\.0085/);
+    assert.doesNotMatch(appSrc, /if\s*\(!local\.chartDetected\)\s*\{\s*return;\s*\}/);
+    assert.match(appSrc, /geminiChartBoundsRef/);
+    assert.match(appSrc, /geminiVisionCandleRef/);
+  });
+
+  it('Stage 5 & 6: validates Windows agent v1.3.2 UpdateLayeredWindow rendering contract, SetupWizard launch flags, and clean installer build', async () => {
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    // Win32 UpdateLayeredWindow 32-bit premultiplied alpha composition (replaces TransparencyKey Magenta)
+    assert.doesNotMatch(cs, /TransparencyKey\s*=/);
+    assert.match(cs, /PixelFormat\.Format32bppPArgb/);
+    assert.match(cs, /Win32Native\.UpdateLayeredWindow/);
+    assert.match(cs, /DWMWA_CLOAKED/);
+    assert.match(cs, /exePath/);
+    assert.match(cs, /lastRenderError/);
+    assert.doesNotMatch(cs, /nowMs\s*-\s*_state\.StatusUpdatedAtMs\s*>\s*450/);
+
+    const wizard = fs.readFileSync(
+      path.resolve('native/windows-overlay/installer/SetupWizard.cs'),
+      'utf8'
+    );
+    assert.doesNotMatch(wizard, /ProcessWindowStyle\.Hidden/);
+    assert.doesNotMatch(wizard, /CreateNoWindow\s*=\s*true/);
+
+    const buildPs1 = fs.readFileSync(
+      path.resolve('native/windows-overlay/installer/Build-ChartPulseInstaller.ps1'),
+      'utf8'
+    );
+    assert.match(buildPs1, /Remove-Item\s+-Force\s+-ErrorAction\s+SilentlyContinue\s+\$overlayExe,\s*\$setupExe/);
+
+    // Stage 5 server endpoints receive status + candle payloads cleanly
+    const candleRes = await netlifyOverlayCandleHandler(
+      new Request('https://example.netlify.app/api/overlay/candle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'stage5-sess',
+          liveCandle: {
+            x: 0.72,
+            y: 0.48,
+            chartRelativeX: 0.85,
+            chartRelativeY: 0.45,
+            topY: 0.41,
+            bottomY: 0.52,
+            direction: 'BULL',
+            chartBounds: { x: 0.05, y: 0.1, width: 0.8, height: 0.75 },
+            confidence: 0.9,
+            updatedAt: Date.now(),
+          },
+        }),
+      })
+    );
+    assert.equal(candleRes.status, 200);
+
+    const statusRes = await netlifyOverlayStatusHandler(
+      new Request('https://example.netlify.app/api/overlay/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'stage5-sess',
+          operationalStatus: {
+            status: 'AGUARDANDO',
+            timeframe: 'M1',
+            confidence: 0,
+            anchor: { x: 0.72, y: 0.39, chartRelativeX: 0.85, chartRelativeY: 0.39 },
+          },
+        }),
+      })
+    );
+    assert.equal(statusRes.status, 200);
+  });
+
+  it('Stage 7 & 8: tracks multi-update M1 candle movement smoothly and switches AGUARDANDO <-> COMPRA/VENDA seamlessly', () => {
+    const bounds = { x: 0.05, y: 0.1, width: 0.8, height: 0.75 };
+    const t0 = 1_700_000_000_000;
+    const makeCandle = (y: number, topY: number, dir: 'BULL' | 'BEAR') => ({
+      x: 0.74,
+      y,
+      chartRelativeX: (0.74 - bounds.x) / bounds.width,
+      chartRelativeY: (y - bounds.y) / bounds.height,
+      topY,
+      bottomY: Math.min(0.84, y + 0.05),
+      direction: dir,
+      chartBounds: bounds,
+      confidence: 0.92,
+      updatedAt: t0,
+    });
+
+    // Stage 7: Multi-update vertical movement while in AGUARDANDO
+    let status = resolveOperationalStatus({
+      isActive: true,
+      current: createInitialOperationalStatus(bounds, null, t0),
+      activeSignal: null,
+      liveCandle: makeCandle(0.55, 0.50, 'BULL'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 250,
+    });
+    assert.ok(status && status.anchor);
+    const yStep1 = status.anchor.y;
+
+    status = resolveOperationalStatus({
+      isActive: true,
+      current: status,
+      activeSignal: null,
+      liveCandle: makeCandle(0.42, 0.37, 'BULL'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 500,
+    });
+    assert.ok(status && status.anchor);
+    assert.ok(status.anchor.y < yStep1 - 0.08, 'Stage 7: AGUARDANDO rises smoothly with upward M1 candle');
+
+    status = resolveOperationalStatus({
+      isActive: true,
+      current: status,
+      activeSignal: null,
+      liveCandle: makeCandle(0.62, 0.58, 'BEAR'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 750,
+    });
+    assert.ok(status && status.anchor);
+    assert.ok(status.anchor.y > yStep1, 'Stage 7: AGUARDANDO drops smoothly with downward M1 candle');
+
+    // Stage 8: Transitions AGUARDANDO -> COMPRA (65%) -> AGUARDANDO -> VENDA (68%) -> AGUARDANDO
+    const buySig = {
+      id: 's8-buy',
+      direction: 'COMPRA' as const,
+      candleX: 0.74,
+      candleY: 0.62,
+      chartRelativeX: (0.74 - bounds.x) / bounds.width,
+      chartRelativeY: (0.62 - bounds.y) / bounds.height,
+      chartBounds: bounds,
+      confidence: 65,
+      candleId: 'c-1',
+      marketRegime: 'TRENDING_UP' as const,
+      createdAt: t0 + 800,
+      expiresAt: t0 + 4000,
+    };
+    const buyStatus = resolveOperationalStatus({
+      isActive: true,
+      current: status,
+      activeSignal: buySig,
+      liveCandle: makeCandle(0.62, 0.58, 'BULL'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 1000,
+    });
+    assert.equal(buyStatus?.status, 'COMPRA');
+    assert.ok(buyStatus?.anchor !== null);
+
+    const backToWait = resolveOperationalStatus({
+      isActive: true,
+      current: buyStatus,
+      activeSignal: buySig,
+      liveCandle: makeCandle(0.60, 0.56, 'BULL'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 4500,
+    });
+    assert.equal(backToWait?.status, 'AGUARDANDO');
+    assert.ok(backToWait?.anchor !== null);
+
+    const sellSig = {
+      id: 's8-sell',
+      direction: 'VENDA' as const,
+      candleX: 0.74,
+      candleY: 0.60,
+      chartRelativeX: (0.74 - bounds.x) / bounds.width,
+      chartRelativeY: (0.60 - bounds.y) / bounds.height,
+      chartBounds: bounds,
+      confidence: 68,
+      candleId: 'c-2',
+      marketRegime: 'TRENDING_DOWN' as const,
+      createdAt: t0 + 4600,
+      expiresAt: t0 + 8000,
+    };
+    const sellStatus = resolveOperationalStatus({
+      isActive: true,
+      current: backToWait,
+      activeSignal: sellSig,
+      liveCandle: makeCandle(0.60, 0.56, 'BEAR'),
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 4800,
+    });
+    assert.equal(sellStatus?.status, 'VENDA');
+    assert.ok(sellStatus?.anchor !== null);
+
+    const cleared = resolveOperationalStatus({
+      isActive: false,
+      current: sellStatus,
+      activeSignal: sellSig,
+      liveCandle: null,
+      latestBounds: bounds,
+      chartDetected: true,
+      now: t0 + 5000,
+    });
+    assert.equal(cleared, null);
+  });
+});
+
+
 
 
 

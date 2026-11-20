@@ -21,7 +21,9 @@ if (-not $csc) {
 $overlayExe = Join-Path $outDir "ChartPulseOverlay.exe"
 $setupExe = Join-Path $outDir "ChartPulseOverlaySetup.exe"
 
-Write-Host "Compilando ChartPulseOverlay.exe..."
+Remove-Item -Force -ErrorAction SilentlyContinue $overlayExe, $setupExe
+
+Write-Host "Compilando ChartPulseOverlay.exe (v1.3.2)..."
 & $csc /nologo /target:winexe /optimize+ /out:$overlayExe `
     /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Net.Http.dll `
     $agentSrc

@@ -178,9 +178,7 @@ namespace ChartPulseOverlaySetup
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = InstalledExePath,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
+                    UseShellExecute = false
                 });
 
                 _statusLabel.ForeColor = Color.FromArgb(34, 197, 94);

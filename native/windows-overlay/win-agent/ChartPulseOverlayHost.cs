@@ -23,6 +23,8 @@ namespace ChartPulseOverlayAgent
         public const int WS_EX_TOOLWINDOW = 0x80;
         public const int WS_EX_NOACTIVATE = 0x08000000;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        public const int DWMWA_CLOAKED = 14;
+        public static readonly uint CurrentProcessId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
@@ -43,10 +45,16 @@ namespace ChartPulseOverlayAgent
         public static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
         [DllImport("user32.dll")]
         public static extern bool IsWindow(IntPtr hWnd);
@@ -83,6 +91,64 @@ namespace ChartPulseOverlayAgent
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE
+        {
+            public int Width;
+            public int Height;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        public const byte AC_SRC_OVER = 0x00;
+        public const byte AC_SRC_ALPHA = 0x01;
+        public const int ULW_ALPHA = 0x00000002;
+
+        [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+        public static extern bool UpdateLayeredWindow(
+            IntPtr hwnd,
+            IntPtr hdcDst,
+            ref POINT pptDst,
+            ref SIZE psize,
+            IntPtr hdcSrc,
+            ref POINT pptSrc,
+            int crKey,
+            ref BLENDFUNCTION pblend,
+            int dwFlags
+        );
+
+        [DllImport("user32.dll", ExactSpelling = true)]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll", ExactSpelling = true)]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        public static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        public static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll", ExactSpelling = true)]
+        public static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        public static extern bool DeleteObject(IntPtr hObject);
     }
 
     internal sealed class OverlayPayload
@@ -163,6 +229,9 @@ namespace ChartPulseOverlayAgent
         private long _statusUpdates;
         private long _signalUpdates;
         private long _paintCount;
+        private long _cloakedSkipped;
+        private int _repaintQueued;
+        private string _lastRenderError = string.Empty;
         private Rectangle _lastTargetBounds = new Rectangle(0, 0, 1, 1);
         private bool _hasSmoothedStatus;
         private double _smoothStatusNormX;
@@ -198,17 +267,20 @@ namespace ChartPulseOverlayAgent
             "MetaTrader",
             "Deriv",
             "Binance",
-            "Bybit"
+            "Bybit",
+            "BullEx",
+            "ExpertOption",
+            "Spectre",
+            "cTrader",
+            "NinjaTrader",
+            "Thinkorswim"
         };
 
         public OverlayForm()
         {
-            DoubleBuffered = true;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
-            BackColor = Color.Magenta;
-            TransparencyKey = Color.Magenta;
             StartPosition = FormStartPosition.Manual;
             Rectangle initialScreen = Screen.PrimaryScreen != null
                 ? Screen.PrimaryScreen.Bounds
@@ -250,6 +322,10 @@ namespace ChartPulseOverlayAgent
         private void ApplyOverlayStylesAndTopMost()
         {
             if (!IsHandleCreated) return;
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
             int exStyle = Win32Native.GetWindowLong(Handle, Win32Native.GWL_EXSTYLE);
             int requiredStyle = Win32Native.WS_EX_LAYERED
                 | Win32Native.WS_EX_TRANSPARENT
@@ -267,8 +343,22 @@ namespace ChartPulseOverlayAgent
                 0,
                 0,
                 0,
-                Win32Native.SWP_NOMOVE | Win32Native.SWP_NOSIZE | Win32Native.SWP_NOACTIVATE
+                Win32Native.SWP_NOMOVE | Win32Native.SWP_NOSIZE | Win32Native.SWP_NOACTIVATE | Win32Native.SWP_SHOWWINDOW
             );
+        }
+
+        private void EnsureOverlayVisibleAndTopMost()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+            if (!Visible)
+            {
+                Show();
+            }
+            ApplyOverlayStylesAndTopMost();
         }
 
         public void StartSession(string sessionId, string displaySurface)
@@ -313,7 +403,11 @@ namespace ChartPulseOverlayAgent
                     BeginInvoke((Action)(() =>
                     {
                         _hasSmoothedStatus = false;
-                        Invalidate();
+                        PresentLayeredFrame();
+                        if (Visible)
+                        {
+                            Hide();
+                        }
                     }));
                 }
                 catch
@@ -402,8 +496,8 @@ namespace ChartPulseOverlayAgent
                 _state.LiveCandleBoundsH = bh;
                 _state.LiveCandleUpdatedAtMs = nowMs;
 
-                // Keep operational status callout glued above the moving M1 candle even between /overlay/status ticks
-                if (hasLiveCandle && (nowMs - _state.StatusUpdatedAtMs > 450 || !_state.HasStatusAnchor))
+                // Continuously keep operational status callout anchored directly above the live moving M1 candle
+                if (hasLiveCandle)
                 {
                     double topNorm = Math.Max(0.01, Math.Min(0.98, Math.Min(candleTopY, candleY)));
                     double rawAnchorY = topNorm - 0.016;
@@ -412,7 +506,7 @@ namespace ChartPulseOverlayAgent
                         double rawCandleX = bx + chartRelativeX * bw;
                         double marginX = Math.Min(0.012, bw * 0.04);
                         double clampedX = Math.Max(bx + marginX, Math.Min(bx + bw - marginX, rawCandleX));
-                        double minY = by + Math.Min(0.068, bh * 0.2);
+                        double minY = by + Math.Min(0.014, bh * 0.05);
                         double maxY = Math.Max(minY, by + bh - 0.015);
                         double clampedY = Math.Max(minY, Math.Min(maxY, rawAnchorY));
                         _state.HasStatusBounds = true;
@@ -545,6 +639,19 @@ namespace ChartPulseOverlayAgent
                 _state.BoundsH = bh;
                 _state.ExpiresAtMs = expiresAtMs;
                 _state.OperationalStatus = (direction == "COMPRA" || direction == "VENDA") ? direction : "AGUARDANDO";
+                if (!_state.HasStatusAnchor && candleX >= 0.02 && candleX <= 0.98 && candleY >= 0.02 && candleY <= 0.98)
+                {
+                    _state.HasStatusBounds = hasBounds;
+                    _state.StatusBoundsX = bx;
+                    _state.StatusBoundsY = by;
+                    _state.StatusBoundsW = bw;
+                    _state.StatusBoundsH = bh;
+                    _state.StatusAnchorX = candleX;
+                    _state.StatusAnchorY = Math.Max(0.05, candleY - 0.02);
+                    _state.StatusRelativeX = relX;
+                    _state.StatusRelativeY = Math.Max(0.03, relY - 0.02);
+                    _state.HasStatusAnchor = true;
+                }
             }
             Interlocked.Increment(ref _signalUpdates);
             RequestRepaint();
@@ -554,13 +661,25 @@ namespace ChartPulseOverlayAgent
         {
             if (IsHandleCreated && !IsDisposed)
             {
+                if (Interlocked.CompareExchange(ref _repaintQueued, 1, 0) != 0)
+                {
+                    return;
+                }
                 try
                 {
-                    BeginInvoke((Action)(() => Invalidate()));
+                    BeginInvoke((Action)(() =>
+                    {
+                        Interlocked.Exchange(ref _repaintQueued, 0);
+                        if (IsAnalysisActive())
+                        {
+                            EnsureOverlayVisibleAndTopMost();
+                        }
+                        PresentLayeredFrame();
+                    }));
                 }
                 catch
                 {
-                    // Ignore handle disposal race
+                    Interlocked.Exchange(ref _repaintQueued, 0);
                 }
             }
         }
@@ -600,14 +719,27 @@ namespace ChartPulseOverlayAgent
                     ? (active ? "AGUARDANDO" : "NONE")
                     : _state.OperationalStatus;
             }
-            Rectangle b = _lastTargetBounds;
-            Rectangle ob = Bounds;
+            Rectangle b;
+            Rectangle ob;
+            bool isVis;
+            string currentTitle;
+            string renderErr;
+            lock (_stateLock)
+            {
+                b = _lastTargetBounds;
+                currentTitle = _targetTitle ?? string.Empty;
+                renderErr = _lastRenderError ?? string.Empty;
+            }
+            ob = Bounds;
+            isVis = Visible;
             string boundsText = string.Format("{0},{1},{2}x{3}", b.X, b.Y, b.Width, b.Height);
             string overlayBoundsText = string.Format("{0},{1},{2}x{3}", ob.X, ob.Y, ob.Width, ob.Height);
-            string safeTitle = (_targetTitle ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "'");
+            string safeTitle = currentTitle.Replace("\\", "\\\\").Replace("\"", "'");
+            string safeExe = (Application.ExecutablePath ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "'");
+            string safeErr = renderErr.Replace("\\", "\\\\").Replace("\"", "'");
             return string.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
-                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.1\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"hasStatusAnchor\":{10},\"hasLiveCandle\":{11},\"hasPriceLine\":{12},\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"overlayBounds\":\"{13}\",\"overlayVisible\":{14},\"targetWindowTitle\":\"{15}\",\"lastStatusAnchorX\":{16:0.0000},\"lastStatusAnchorY\":{17:0.0000},\"lastCandleX\":{18:0.0000},\"lastCandleY\":{19:0.0000},\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9}}}",
+                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.2\",\"buildId\":\"2026-11-20-ulw\",\"exePath\":\"{21}\",\"processId\":{22},\"lastRenderError\":\"{23}\",\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"hasStatusAnchor\":{10},\"hasLiveCandle\":{11},\"hasPriceLine\":{12},\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"overlayBounds\":\"{13}\",\"overlayVisible\":{14},\"targetWindowTitle\":\"{15}\",\"lastStatusAnchorX\":{16:0.0000},\"lastStatusAnchorY\":{17:0.0000},\"lastCandleX\":{18:0.0000},\"lastCandleY\":{19:0.0000},\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9},\"cloakedSkipped\":{20}}}",
                 active ? "true" : "false",
                 autoStart ? "true" : "false",
                 surface,
@@ -622,13 +754,30 @@ namespace ChartPulseOverlayAgent
                 hasLiveCandle ? "true" : "false",
                 hasPriceLine ? "true" : "false",
                 overlayBoundsText,
-                Visible ? "true" : "false",
+                isVis ? "true" : "false",
                 safeTitle,
                 ax,
                 ay,
                 lx,
-                ly
+                ly,
+                Interlocked.Read(ref _cloakedSkipped),
+                safeExe,
+                Win32Native.CurrentProcessId,
+                safeErr
             );
+        }
+
+        private static bool IsBrokerWindowTitle(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title)) return false;
+            for (int i = 0; i < PreferredBrokerKeywords.Length; i++)
+            {
+                if (title.IndexOf(PreferredBrokerKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private bool TryGetValidWindowBounds(IntPtr hwnd, out Rectangle bounds, out string title)
@@ -637,6 +786,20 @@ namespace ChartPulseOverlayAgent
             title = string.Empty;
             if (hwnd == IntPtr.Zero || hwnd == Handle || !Win32Native.IsWindow(hwnd) || !Win32Native.IsWindowVisible(hwnd) || Win32Native.IsIconic(hwnd))
             {
+                return false;
+            }
+
+            uint pid;
+            Win32Native.GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == Win32Native.CurrentProcessId)
+            {
+                return false;
+            }
+
+            int cloaked = 0;
+            if (Win32Native.DwmGetWindowAttribute(hwnd, Win32Native.DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0)
+            {
+                Interlocked.Increment(ref _cloakedSkipped);
                 return false;
             }
 
@@ -685,7 +848,7 @@ namespace ChartPulseOverlayAgent
             return true;
         }
 
-        private IntPtr FindBestBrokerFallbackWindow()
+        private IntPtr FindBestBrokerFallbackWindow(bool keywordOnly)
         {
             IntPtr keywordMatch = IntPtr.Zero;
             IntPtr largestWindow = IntPtr.Zero;
@@ -700,25 +863,25 @@ namespace ChartPulseOverlayAgent
                     return true;
                 }
 
-                for (int i = 0; i < PreferredBrokerKeywords.Length; i++)
+                if (IsBrokerWindowTitle(title))
                 {
-                    if (title.IndexOf(PreferredBrokerKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        keywordMatch = hwnd;
-                        return false;
-                    }
+                    keywordMatch = hwnd;
+                    return false;
                 }
 
-                long area = (long)r.Width * r.Height;
-                if (area > largestArea)
+                if (!keywordOnly)
                 {
-                    largestArea = area;
-                    largestWindow = hwnd;
+                    long area = (long)r.Width * r.Height;
+                    if (area > largestArea)
+                    {
+                        largestArea = area;
+                        largestWindow = hwnd;
+                    }
                 }
                 return true;
             }, IntPtr.Zero);
 
-            return keywordMatch != IntPtr.Zero ? keywordMatch : largestWindow;
+            return keywordMatch != IntPtr.Zero ? keywordMatch : (keywordOnly ? IntPtr.Zero : largestWindow);
         }
 
         private void OnTrackTick(object sender, EventArgs e)
@@ -729,7 +892,16 @@ namespace ChartPulseOverlayAgent
                 snapshot = _state.Clone();
             }
 
-            if (snapshot.Active && snapshot.ExpiresAtMs > 0 && UtcNowMs() > snapshot.ExpiresAtMs)
+            if (!snapshot.Active)
+            {
+                if (Visible)
+                {
+                    Hide();
+                }
+                return;
+            }
+
+            if (snapshot.ExpiresAtMs > 0 && UtcNowMs() > snapshot.ExpiresAtMs)
             {
                 lock (_stateLock)
                 {
@@ -740,10 +912,9 @@ namespace ChartPulseOverlayAgent
                         _state.OperationalStatus = "AGUARDANDO";
                     }
                 }
-                Invalidate();
             }
 
-            if (snapshot.Active && snapshot.HasStatusAnchor)
+            if (snapshot.HasStatusAnchor)
             {
                 double targetNormX = snapshot.HasStatusBounds
                     ? snapshot.StatusBoundsX + snapshot.StatusRelativeX * snapshot.StatusBoundsW
@@ -760,7 +931,6 @@ namespace ChartPulseOverlayAgent
                         _smoothStatusNormX = targetNormX;
                         _smoothStatusNormY = targetNormY;
                         _hasSmoothedStatus = true;
-                        Invalidate();
                     }
                     else
                     {
@@ -772,7 +942,6 @@ namespace ChartPulseOverlayAgent
                             _smoothStatusNormY += dy * 0.45;
                             if (Math.Abs(targetNormX - _smoothStatusNormX) < 0.0004) _smoothStatusNormX = targetNormX;
                             if (Math.Abs(targetNormY - _smoothStatusNormY) < 0.0004) _smoothStatusNormY = targetNormY;
-                            Invalidate();
                         }
                     }
                 }
@@ -780,7 +949,6 @@ namespace ChartPulseOverlayAgent
             else if (_hasSmoothedStatus)
             {
                 _hasSmoothedStatus = false;
-                Invalidate();
             }
 
             IntPtr fg = Win32Native.GetForegroundWindow();
@@ -789,7 +957,10 @@ namespace ChartPulseOverlayAgent
             if (TryGetValidWindowBounds(fg, out fgBounds, out fgTitle))
             {
                 _targetHwnd = fg;
-                _targetTitle = fgTitle;
+                lock (_stateLock)
+                {
+                    _targetTitle = fgTitle;
+                }
             }
 
             if (snapshot.DisplaySurface == "monitor")
@@ -798,78 +969,164 @@ namespace ChartPulseOverlayAgent
                     ? Screen.FromHandle(_targetHwnd)
                     : (Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen);
                 Rectangle monitorBounds = monitorScreen != null ? monitorScreen.Bounds : new Rectangle(0, 0, 1280, 720);
-                _lastTargetBounds = monitorBounds;
+                lock (_stateLock)
+                {
+                    _lastTargetBounds = monitorBounds;
+                }
                 if (Bounds != monitorBounds)
                 {
                     Bounds = monitorBounds;
-                    Invalidate();
                 }
-                if (snapshot.Active)
-                {
-                    if (!Visible) Show();
-                    ApplyOverlayStylesAndTopMost();
-                }
+                EnsureOverlayVisibleAndTopMost();
+                PresentLayeredFrame();
                 return;
             }
 
             Rectangle targetBounds;
             string targetTitle;
-            if (!TryGetValidWindowBounds(_targetHwnd, out targetBounds, out targetTitle))
+            bool currentValid = TryGetValidWindowBounds(_targetHwnd, out targetBounds, out targetTitle);
+            if (!currentValid || !IsBrokerWindowTitle(targetTitle))
             {
-                _targetHwnd = IntPtr.Zero;
-                _targetTitle = string.Empty;
-                if (snapshot.Active)
+                IntPtr brokerMatch = FindBestBrokerFallbackWindow(true);
+                Rectangle brokerBounds;
+                string brokerTitle;
+                if (brokerMatch != IntPtr.Zero && TryGetValidWindowBounds(brokerMatch, out brokerBounds, out brokerTitle))
                 {
-                    IntPtr autoTarget = FindBestBrokerFallbackWindow();
+                    _targetHwnd = brokerMatch;
+                    targetBounds = brokerBounds;
+                    targetTitle = brokerTitle;
+                    currentValid = true;
+                }
+                else if (!currentValid)
+                {
+                    _targetHwnd = IntPtr.Zero;
+                    IntPtr autoTarget = FindBestBrokerFallbackWindow(false);
                     if (TryGetValidWindowBounds(autoTarget, out targetBounds, out targetTitle))
                     {
                         _targetHwnd = autoTarget;
-                        _targetTitle = targetTitle;
+                        currentValid = true;
                     }
                 }
             }
 
-            if (_targetHwnd != IntPtr.Zero && TryGetValidWindowBounds(_targetHwnd, out targetBounds, out targetTitle))
+            if (currentValid && _targetHwnd != IntPtr.Zero)
             {
-                _targetTitle = targetTitle;
-                _lastTargetBounds = targetBounds;
+                lock (_stateLock)
+                {
+                    _targetTitle = targetTitle;
+                    _lastTargetBounds = targetBounds;
+                }
                 if (Bounds != targetBounds)
                 {
                     Bounds = targetBounds;
-                    Invalidate();
                 }
-                if (snapshot.Active)
-                {
-                    if (!Visible) Show();
-                    ApplyOverlayStylesAndTopMost();
-                }
+                EnsureOverlayVisibleAndTopMost();
+                PresentLayeredFrame();
             }
-            else if (snapshot.Active)
+            else
             {
                 Screen fallbackScreen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen;
                 if (fallbackScreen != null)
                 {
-                    _lastTargetBounds = fallbackScreen.Bounds;
+                    lock (_stateLock)
+                    {
+                        _targetTitle = fallbackScreen.DeviceName ?? "PrimaryScreen";
+                        _lastTargetBounds = fallbackScreen.Bounds;
+                    }
                     if (Bounds != fallbackScreen.Bounds)
                     {
                         Bounds = fallbackScreen.Bounds;
-                        Invalidate();
                     }
-                    if (!Visible) Show();
-                    ApplyOverlayStylesAndTopMost();
+                    EnsureOverlayVisibleAndTopMost();
+                    PresentLayeredFrame();
                 }
             }
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        private void PresentLayeredFrame()
         {
-            base.OnPaint(e);
+            if (!IsHandleCreated || IsDisposed) return;
+
             OverlayPayload snapshot;
+            Rectangle targetRect;
             lock (_stateLock)
             {
                 snapshot = _state.Clone();
+                targetRect = _lastTargetBounds;
             }
 
+            int width = Math.Max(100, targetRect.Width > 10 ? targetRect.Width : Bounds.Width);
+            int height = Math.Max(100, targetRect.Height > 10 ? targetRect.Height : Bounds.Height);
+            int dstX = targetRect.Width > 10 ? targetRect.X : Bounds.X;
+            int dstY = targetRect.Height > 10 ? targetRect.Y : Bounds.Y;
+
+            using (Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                RenderOverlayGraphics(g, width, height, snapshot);
+
+                IntPtr screenDc = Win32Native.GetDC(IntPtr.Zero);
+                IntPtr memDc = Win32Native.CreateCompatibleDC(screenDc);
+                IntPtr hBitmap = IntPtr.Zero;
+                IntPtr oldBitmap = IntPtr.Zero;
+                try
+                {
+                    hBitmap = bmp.GetHbitmap(Color.FromArgb(0));
+                    oldBitmap = Win32Native.SelectObject(memDc, hBitmap);
+
+                    Win32Native.POINT dstPt = new Win32Native.POINT { X = dstX, Y = dstY };
+                    Win32Native.SIZE bmpSize = new Win32Native.SIZE { Width = width, Height = height };
+                    Win32Native.POINT srcPt = new Win32Native.POINT { X = 0, Y = 0 };
+                    Win32Native.BLENDFUNCTION blend = new Win32Native.BLENDFUNCTION
+                    {
+                        BlendOp = Win32Native.AC_SRC_OVER,
+                        BlendFlags = 0,
+                        SourceConstantAlpha = 255,
+                        AlphaFormat = Win32Native.AC_SRC_ALPHA
+                    };
+
+                    bool ok = Win32Native.UpdateLayeredWindow(
+                        Handle,
+                        screenDc,
+                        ref dstPt,
+                        ref bmpSize,
+                        memDc,
+                        ref srcPt,
+                        0,
+                        ref blend,
+                        Win32Native.ULW_ALPHA
+                    );
+
+                    lock (_stateLock)
+                    {
+                        _lastRenderError = ok
+                            ? string.Empty
+                            : ("UpdateLayeredWindow win32err=" + Marshal.GetLastWin32Error());
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (_stateLock)
+                    {
+                        _lastRenderError = ex.Message;
+                    }
+                }
+                finally
+                {
+                    Win32Native.ReleaseDC(IntPtr.Zero, screenDc);
+                    if (hBitmap != IntPtr.Zero)
+                    {
+                        Win32Native.SelectObject(memDc, oldBitmap);
+                        Win32Native.DeleteObject(hBitmap);
+                    }
+                    Win32Native.DeleteDC(memDc);
+                }
+            }
+        }
+
+        private void RenderOverlayGraphics(Graphics g, int surfaceW, int surfaceH, OverlayPayload snapshot)
+        {
             bool hasSignal = snapshot.Active && (snapshot.Direction == "COMPRA" || snapshot.Direction == "VENDA");
             bool hasPriceLine = snapshot.Active && snapshot.HasPriceLine;
             bool hasLiveCandle = snapshot.Active && snapshot.HasLiveCandle;
@@ -881,7 +1138,6 @@ namespace ChartPulseOverlayAgent
             }
 
             Interlocked.Increment(ref _paintCount);
-            Graphics g = e.Graphics;
 
             if (hasOpStatus)
             {
@@ -901,8 +1157,8 @@ namespace ChartPulseOverlayAgent
                 if (double.IsNaN(normStatusX) || double.IsInfinity(normStatusX)) normStatusX = 0.5;
                 if (double.IsNaN(normStatusY) || double.IsInfinity(normStatusY)) normStatusY = 0.5;
 
-                float anchorPxX = (float)(Math.Max(0.02, Math.Min(0.98, normStatusX)) * Math.Max(100, ClientSize.Width));
-                float anchorPxY = (float)(Math.Max(0.02, Math.Min(0.98, normStatusY)) * Math.Max(100, ClientSize.Height));
+                float anchorPxX = (float)(Math.Max(0.02, Math.Min(0.98, normStatusX)) * Math.Max(100, surfaceW));
+                float anchorPxY = (float)(Math.Max(0.02, Math.Min(0.98, normStatusY)) * Math.Max(100, surfaceH));
 
                 Color statusColor = statusText == "COMPRA"
                     ? Color.FromArgb(255, 34, 197, 94)
@@ -911,7 +1167,7 @@ namespace ChartPulseOverlayAgent
                         : Color.FromArgb(255, 251, 191, 36));
 
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                g.SmoothingMode = SmoothingMode.None;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (Font statusFont = new Font("Segoe UI", 12.5f, FontStyle.Bold))
                 using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
                 using (Pen statusBorder = new Pen(statusColor, 2f))
@@ -938,17 +1194,17 @@ namespace ChartPulseOverlayAgent
 
                     // Strictly clamp inside chartBounds (or window client area) so callout never overflows
                     float minLeft = snapshot.HasStatusBounds
-                        ? (float)(snapshot.StatusBoundsX * ClientSize.Width) + 4f
+                        ? (float)(snapshot.StatusBoundsX * surfaceW) + 4f
                         : 4f;
                     float maxRight = snapshot.HasStatusBounds
-                        ? (float)((snapshot.StatusBoundsX + snapshot.StatusBoundsW) * ClientSize.Width) - 4f
-                        : ClientSize.Width - 4f;
+                        ? (float)((snapshot.StatusBoundsX + snapshot.StatusBoundsW) * surfaceW) - 4f
+                        : surfaceW - 4f;
                     float minTop = snapshot.HasStatusBounds
-                        ? (float)(snapshot.StatusBoundsY * ClientSize.Height) + 4f
+                        ? (float)(snapshot.StatusBoundsY * surfaceH) + 4f
                         : 4f;
                     float maxBottom = snapshot.HasStatusBounds
-                        ? (float)((snapshot.StatusBoundsY + snapshot.StatusBoundsH) * ClientSize.Height) - 4f
-                        : ClientSize.Height - 4f;
+                        ? (float)((snapshot.StatusBoundsY + snapshot.StatusBoundsH) * surfaceH) - 4f
+                        : surfaceH - 4f;
 
                     drawX = Math.Max(minLeft, Math.Min(Math.Max(minLeft, maxRight - boxW), drawX));
                     drawY = Math.Max(minTop, Math.Min(Math.Max(minTop, maxBottom - totalH), drawY));
@@ -983,19 +1239,19 @@ namespace ChartPulseOverlayAgent
                     ? snapshot.PriceBoundsY + snapshot.ChartRelativePriceY * snapshot.PriceBoundsH
                     : snapshot.PriceY;
 
-                float lineY = (float)(Math.Max(0.02, Math.Min(0.98, normLineY)) * ClientSize.Height);
+                float lineY = (float)(Math.Max(0.02, Math.Min(0.98, normLineY)) * surfaceH);
                 float lineX0 = snapshot.HasPriceBounds
-                    ? (float)(Math.Max(0.0, Math.Min(0.95, snapshot.PriceBoundsX)) * ClientSize.Width)
-                    : (float)(0.04 * ClientSize.Width);
+                    ? (float)(Math.Max(0.0, Math.Min(0.95, snapshot.PriceBoundsX)) * surfaceW)
+                    : (float)(0.04 * surfaceW);
                 float lineX1 = snapshot.HasPriceBounds
-                    ? (float)(Math.Max(lineX0 + 20f, Math.Min(1.0, snapshot.PriceBoundsX + snapshot.PriceBoundsW) * ClientSize.Width))
-                    : (float)(0.92 * ClientSize.Width);
+                    ? (float)(Math.Max(lineX0 + 20f, Math.Min(1.0, snapshot.PriceBoundsX + snapshot.PriceBoundsW) * surfaceW))
+                    : (float)(0.92 * surfaceW);
 
                 g.SmoothingMode = SmoothingMode.None;
-                using (Pen shadowPen = new Pen(Color.FromArgb(255, 8, 12, 18), 1f))
+                using (Pen shadowPen = new Pen(Color.FromArgb(200, 8, 12, 18), 3f))
                 using (Pen linePen = new Pen(Color.FromArgb(255, 56, 189, 248), 2f))
                 {
-                    g.DrawLine(shadowPen, lineX0, lineY + 1.5f, lineX1, lineY + 1.5f);
+                    g.DrawLine(shadowPen, lineX0, lineY, lineX1, lineY);
                     g.DrawLine(linePen, lineX0, lineY, lineX1, lineY);
                 }
             }
@@ -1009,8 +1265,8 @@ namespace ChartPulseOverlayAgent
                     ? snapshot.LiveCandleBoundsY + snapshot.ChartRelativeLiveY * snapshot.LiveCandleBoundsH
                     : snapshot.LiveCandleY;
 
-                float cx = (float)(Math.Max(0.02, Math.Min(0.98, normLiveX)) * ClientSize.Width);
-                float cy = (float)(Math.Max(0.02, Math.Min(0.98, normLiveY)) * ClientSize.Height);
+                float cx = (float)(Math.Max(0.02, Math.Min(0.98, normLiveX)) * surfaceW);
+                float cy = (float)(Math.Max(0.02, Math.Min(0.98, normLiveY)) * surfaceH);
 
                 Color markerColor = snapshot.LiveCandleDirection == "BULL"
                     ? Color.FromArgb(255, 16, 185, 129)
@@ -1018,8 +1274,8 @@ namespace ChartPulseOverlayAgent
                         ? Color.FromArgb(255, 244, 63, 94)
                         : Color.FromArgb(255, 251, 191, 36));
 
-                g.SmoothingMode = SmoothingMode.None;
-                using (SolidBrush outerDark = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (SolidBrush outerDark = new SolidBrush(Color.FromArgb(220, 11, 14, 17)))
                 using (Pen ringPen = new Pen(markerColor, 2f))
                 using (SolidBrush coreBrush = new SolidBrush(markerColor))
                 {
@@ -1038,6 +1294,18 @@ namespace ChartPulseOverlayAgent
                 _trackTimer.Dispose();
             }
             base.Dispose(disposing);
+        }
+    }
+
+    internal sealed class OverlayApplicationContext : ApplicationContext
+    {
+        public OverlayApplicationContext(OverlayForm form)
+        {
+            IntPtr ensureHandle = form.Handle;
+            if (ensureHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("OverlayForm handle creation failed.");
+            }
         }
     }
 
@@ -1078,7 +1346,7 @@ namespace ChartPulseOverlayAgent
             httpThread.IsBackground = true;
             httpThread.Start();
 
-            Application.Run(_overlayForm);
+            Application.Run(new OverlayApplicationContext(_overlayForm));
             _singleInstanceMutex.ReleaseMutex();
         }
 
@@ -1232,8 +1500,11 @@ namespace ChartPulseOverlayAgent
                 res.Headers["Vary"] = "Origin";
             }
 
+            string reqHeaders = req.Headers["Access-Control-Request-Headers"];
             res.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
-            res.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+            res.Headers["Access-Control-Allow-Headers"] = !string.IsNullOrWhiteSpace(reqHeaders)
+                ? reqHeaders
+                : "Content-Type, Accept";
             res.Headers["Access-Control-Allow-Private-Network"] = "true";
             res.Headers["Cache-Control"] = "no-store";
 

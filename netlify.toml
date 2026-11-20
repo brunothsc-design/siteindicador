@@ -13,6 +13,8 @@
   for = "/*"
   [headers.values]
     Permissions-Policy = "display-capture=(self)"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
 
 [[redirects]]
   from = "/api/analyze-frame"
