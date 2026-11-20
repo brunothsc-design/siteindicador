@@ -162,6 +162,9 @@ namespace ChartPulseOverlayAgent
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool DestroyIcon(IntPtr hIcon);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForWindow(IntPtr hwnd);
     }
 
     internal sealed class BrokerWindowCandidate
@@ -175,7 +178,7 @@ namespace ChartPulseOverlayAgent
 
         public override string ToString()
         {
-            string tag = IsLikelyBroker ? "[CORRETORA]" : "[JANELA]";
+            string tag = IsLikelyBroker ? "[PLATAFORMA]" : "[JANELA]";
             string stateTag = IsMinimized ? " (Minimizada)" : string.Format(" ({0}x{1})", PhysicalBounds.Width, PhysicalBounds.Height);
             string proc = string.IsNullOrEmpty(ProcessName) ? string.Empty : (" [" + ProcessName + "]");
             return string.Format("{0} {1}{2}{3} — 0x{4:X}", tag, Title, proc, stateTag, Hwnd.ToInt64());
@@ -268,6 +271,7 @@ namespace ChartPulseOverlayAgent
 
         private Rectangle _lastTargetBounds = new Rectangle(0, 0, 1, 1);
         private Rectangle _lastCaptureMonitorBounds = new Rectangle(0, 0, 1280, 720);
+        private uint _lastWindowDpi = 96;
         private bool _targetMinimized;
 
         private IntPtr _loggedTargetHwnd = IntPtr.Zero;
@@ -308,27 +312,46 @@ namespace ChartPulseOverlayAgent
 
         private static readonly string[] PreferredBrokerKeywords = new string[]
         {
+            "TradingView",
+            "MetaTrader",
+            "MT4",
+            "MT5",
+            "cTrader",
+            "NinjaTrader",
+            "Thinkorswim",
+            "Binance",
+            "Bybit",
+            "OKX",
+            "KuCoin",
+            "Coinbase",
+            "Kraken",
+            "Bitget",
+            "MEXC",
+            "Webull",
+            "Profit",
+            "Tryd",
+            "ProRealTime",
+            "Interactive Brokers",
             "IQ Option",
             "Quotex",
             "Pocket Option",
             "Binomo",
             "Olymp Trade",
             "Exnova",
-            "TradingView",
-            "MetaTrader",
             "Deriv",
-            "Binance",
-            "Bybit",
             "BullEx",
             "ExpertOption",
             "Spectre",
-            "cTrader",
-            "NinjaTrader",
-            "Thinkorswim",
             "Polarium",
             "Stockity",
             "Homebroker",
-            "Avalon"
+            "Avalon",
+            "Chart",
+            "Gráfico",
+            "Trading",
+            "Broker",
+            "Corretora",
+            "Exchange"
         };
 
         public OverlayForm()
@@ -502,7 +525,7 @@ namespace ChartPulseOverlayAgent
             {
                 isManual = _manualSelectedHwnd != IntPtr.Zero;
                 IntPtr activeHwnd = isManual ? _manualSelectedHwnd : _targetHwnd;
-                string title = string.IsNullOrEmpty(_targetTitle) ? "Aguardando janela da corretora" : _targetTitle;
+                string title = string.IsNullOrEmpty(_targetTitle) ? "Aguardando janela da plataforma/corretora" : _targetTitle;
                 if (activeHwnd == IntPtr.Zero)
                 {
                     return title;
@@ -903,6 +926,7 @@ namespace ChartPulseOverlayAgent
             float drawnScreenX;
             float drawnScreenY;
 
+            uint dpiVal;
             lock (_stateLock)
             {
                 active = _state.Active;
@@ -918,6 +942,7 @@ namespace ChartPulseOverlayAgent
                     ? (active ? "AGUARDANDO" : "NONE")
                     : _state.OperationalStatus;
                 b = _lastTargetBounds;
+                dpiVal = _lastWindowDpi;
                 isMin = _targetMinimized;
                 isManual = _manualSelectedHwnd != IntPtr.Zero;
                 hwnd = isManual ? _manualSelectedHwnd : _targetHwnd;
@@ -946,7 +971,7 @@ namespace ChartPulseOverlayAgent
 
             return string.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
-                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.2\",\"buildId\":\"2026-11-20-hwnd\",\"exePath\":\"{21}\",\"processId\":{22},\"lastRenderError\":\"{23}\",\"targetHwnd\":\"{24}\",\"selectionMode\":\"{25}\",\"targetMinimized\":{26},\"lastDrawnScreenX\":{27:0.0},\"lastDrawnScreenY\":{28:0.0},\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"hasStatusAnchor\":{10},\"hasLiveCandle\":{11},\"hasPriceLine\":{12},\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"overlayBounds\":\"{13}\",\"overlayVisible\":{14},\"targetWindowTitle\":\"{15}\",\"lastStatusAnchorX\":{16:0.0000},\"lastStatusAnchorY\":{17:0.0000},\"lastCandleX\":{18:0.0000},\"lastCandleY\":{19:0.0000},\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9},\"cloakedSkipped\":{20}}}",
+                "{{\"ok\":true,\"component\":\"ChartPulseOverlay\",\"version\":\"1.3.2\",\"buildId\":\"2026-11-20-hwnd\",\"exePath\":\"{21}\",\"processId\":{22},\"lastRenderError\":\"{23}\",\"targetHwnd\":\"{24}\",\"selectionMode\":\"{25}\",\"windowDpi\":{29},\"targetMinimized\":{26},\"lastDrawnScreenX\":{27:0.0},\"lastDrawnScreenY\":{28:0.0},\"priceLineSupported\":true,\"liveCandleSupported\":true,\"operationalStatusSupported\":true,\"hasStatusAnchor\":{10},\"hasLiveCandle\":{11},\"hasPriceLine\":{12},\"active\":{0},\"autoStartEnabled\":{1},\"displaySurface\":\"{2}\",\"operationalStatus\":\"{3}\",\"targetBounds\":\"{4}\",\"overlayBounds\":\"{13}\",\"overlayVisible\":{14},\"targetWindowTitle\":\"{15}\",\"lastStatusAnchorX\":{16:0.0000},\"lastStatusAnchorY\":{17:0.0000},\"lastCandleX\":{18:0.0000},\"lastCandleY\":{19:0.0000},\"priceLineUpdates\":{5},\"liveCandleUpdates\":{6},\"statusUpdates\":{7},\"signalUpdates\":{8},\"paintCount\":{9},\"cloakedSkipped\":{20}}}",
                 active ? "true" : "false",
                 autoStart ? "true" : "false",
                 surface,
@@ -975,7 +1000,8 @@ namespace ChartPulseOverlayAgent
                 isManual ? "manual" : "auto",
                 isMin ? "true" : "false",
                 drawnScreenX,
-                drawnScreenY
+                drawnScreenY,
+                dpiVal
             );
         }
 
@@ -1258,8 +1284,8 @@ namespace ChartPulseOverlayAgent
 
             if (manualHwnd == IntPtr.Zero)
             {
-                // Keep tracking a locked broker window if minimized so restoring it brings back the overlay cleanly
-                if (_targetHwnd != IntPtr.Zero && Win32Native.IsWindow(_targetHwnd) && Win32Native.IsIconic(_targetHwnd) && IsBrokerWindowTitle(_targetTitle))
+                // Keep tracking an active target window if minimized so restoring any platform brings back the overlay cleanly
+                if (_targetHwnd != IntPtr.Zero && Win32Native.IsWindow(_targetHwnd) && Win32Native.IsIconic(_targetHwnd))
                 {
                     resolvedHwnd = _targetHwnd;
                     targetTitle = _targetTitle;
@@ -1284,7 +1310,9 @@ namespace ChartPulseOverlayAgent
                         resolvedHwnd = _targetHwnd;
                     }
 
-                    if (!currentValid || !IsBrokerWindowTitle(targetTitle))
+                    // Only use fallback enumeration when no valid foreground or active target window is available yet
+                    // so any foreground broker/chart platform stays locked without being stolen by background windows
+                    if (!currentValid)
                     {
                         IntPtr brokerMatch = FindBestBrokerFallbackWindow(true);
                         Rectangle brokerBounds;
@@ -1297,7 +1325,7 @@ namespace ChartPulseOverlayAgent
                             targetTitle = brokerTitle;
                             currentValid = true;
                         }
-                        else if (!currentValid)
+                        else
                         {
                             IntPtr autoTarget = FindBestBrokerFallbackWindow(false);
                             if (TryGetValidWindowBounds(autoTarget, out targetBounds, out targetTitle))
@@ -1354,14 +1382,16 @@ namespace ChartPulseOverlayAgent
                 targetTitle = monitorScreen != null ? (monitorScreen.DeviceName ?? "PrimaryScreen") : "PrimaryScreen";
             }
 
-            bool geometryChanged = resolvedHwnd != _loggedTargetHwnd || targetBounds != _loggedTargetBounds;
+            uint effectiveDpi = GetEffectiveWindowDpi(resolvedHwnd != IntPtr.Zero ? resolvedHwnd : Handle);
+
+            bool geometryChanged = resolvedHwnd != _loggedTargetHwnd || targetBounds != _loggedTargetBounds || effectiveDpi != _lastWindowDpi;
             if (geometryChanged)
             {
                 _loggedTargetHwnd = resolvedHwnd;
                 _loggedTargetBounds = targetBounds;
                 _forceRepaint = true;
                 Program.WriteDiagnosticLog(string.Format(
-                    "TARGET_WINDOW hwnd=0x{0:X} ({0}) mode={1} surface={2} title=\"{3}\" physicalRect={4},{5},{6}x{7} monitor={8},{9},{10}x{11}",
+                    "TARGET_WINDOW hwnd=0x{0:X} ({0}) mode={1} surface={2} dpi={12} title=\"{3}\" physicalRect={4},{5},{6}x{7} monitor={8},{9},{10}x{11}",
                     resolvedHwnd.ToInt64(),
                     manualHwnd != IntPtr.Zero ? "manual" : "auto",
                     snapshot.DisplaySurface,
@@ -1373,7 +1403,8 @@ namespace ChartPulseOverlayAgent
                     monitorBounds.X,
                     monitorBounds.Y,
                     monitorBounds.Width,
-                    monitorBounds.Height
+                    monitorBounds.Height,
+                    effectiveDpi
                 ));
             }
 
@@ -1384,10 +1415,29 @@ namespace ChartPulseOverlayAgent
                 _targetMinimized = false;
                 _lastTargetBounds = targetBounds;
                 _lastCaptureMonitorBounds = monitorBounds;
+                _lastWindowDpi = effectiveDpi;
             }
 
             PresentLayeredFrame(_forceRepaint);
             EnsureOverlayVisibleAndTopMost(targetBounds);
+        }
+
+        private static uint GetEffectiveWindowDpi(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return 96;
+            try
+            {
+                uint dpi = Win32Native.GetDpiForWindow(hwnd);
+                if (dpi >= 72 && dpi <= 384)
+                {
+                    return dpi;
+                }
+            }
+            catch
+            {
+                // Fallback safely on older Windows builds lacking GetDpiForWindow
+            }
+            return 96;
         }
 
         private void ConvertCaptureNormToOverlayPx(
@@ -1444,11 +1494,13 @@ namespace ChartPulseOverlayAgent
             OverlayPayload snapshot;
             Rectangle targetRect;
             Rectangle monitorRect;
+            uint windowDpi;
             lock (_stateLock)
             {
                 snapshot = _state.Clone();
                 targetRect = _lastTargetBounds;
                 monitorRect = _lastCaptureMonitorBounds;
+                windowDpi = _lastWindowDpi;
             }
 
             int width = Math.Max(100, targetRect.Width > 10 ? targetRect.Width : Bounds.Width);
@@ -1458,7 +1510,7 @@ namespace ChartPulseOverlayAgent
 
             string renderSig = string.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
-                "{0}|{1}|{2}|{3}|{4:0.0000},{5:0.0000}|{6}|{7:0.0000}|{8}|{9:0.0000},{10:0.0000}|{11}x{12}@{13},{14}",
+                "{0}|{1}|{2}|{3}|{4:0.0000},{5:0.0000}|{6}|{7:0.0000}|{8}|{9:0.0000},{10:0.0000}|{11}x{12}@{13},{14}|{15}",
                 snapshot.Active ? 1 : 0,
                 snapshot.DisplaySurface,
                 snapshot.OperationalStatus,
@@ -1473,7 +1525,8 @@ namespace ChartPulseOverlayAgent
                 width,
                 height,
                 dstX,
-                dstY
+                dstY,
+                windowDpi
             );
 
             if (!forceRepaint && _layeredSurface != null && renderSig == _lastRenderSignature)
@@ -1489,7 +1542,7 @@ namespace ChartPulseOverlayAgent
             using (Graphics g = Graphics.FromImage(_layeredSurface))
             {
                 g.Clear(Color.Transparent);
-                RenderOverlayGraphics(g, targetRect, monitorRect, snapshot);
+                RenderOverlayGraphics(g, targetRect, monitorRect, snapshot, windowDpi);
             }
 
             IntPtr screenDc = Win32Native.GetDC(IntPtr.Zero);
@@ -1563,10 +1616,11 @@ namespace ChartPulseOverlayAgent
             }
         }
 
-        private void RenderOverlayGraphics(Graphics g, Rectangle targetRect, Rectangle monitorRect, OverlayPayload snapshot)
+        private void RenderOverlayGraphics(Graphics g, Rectangle targetRect, Rectangle monitorRect, OverlayPayload snapshot, uint windowDpi)
         {
             int surfaceW = Math.Max(100, targetRect.Width);
             int surfaceH = Math.Max(100, targetRect.Height);
+            float dpiScale = Math.Max(1.0f, Math.Min(2.5f, windowDpi / 96.0f));
 
             bool hasSignal = snapshot.Active && (snapshot.Direction == "COMPRA" || snapshot.Direction == "VENDA");
             bool hasPriceLine = snapshot.Active && snapshot.HasPriceLine;
@@ -1628,9 +1682,9 @@ namespace ChartPulseOverlayAgent
 
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (Font statusFont = new Font("Segoe UI", 12.5f, FontStyle.Bold))
+                using (Font statusFont = new Font("Segoe UI", 12.5f * dpiScale, FontStyle.Bold))
                 using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
-                using (Pen statusBorder = new Pen(statusColor, 2f))
+                using (Pen statusBorder = new Pen(statusColor, 2f * dpiScale))
                 using (SolidBrush statusBrush = new SolidBrush(statusColor))
                 using (StringFormat centered = new StringFormat())
                 {
@@ -1638,23 +1692,24 @@ namespace ChartPulseOverlayAgent
                     centered.LineAlignment = StringAlignment.Center;
 
                     SizeF stSize = g.MeasureString(statusText, statusFont);
-                    float padX = 14f;
-                    float padY = 6f;
-                    float boxW = Math.Max(104f, stSize.Width + padX * 2f);
+                    float padX = 14f * dpiScale;
+                    float padY = 6f * dpiScale;
+                    float boxW = Math.Max(104f * dpiScale, stSize.Width + padX * 2f);
                     float boxH = stSize.Height + padY * 2f;
-                    float arrowH = 7f;
-                    float arrowHalfW = 7f;
+                    float arrowH = 7f * dpiScale;
+                    float arrowHalfW = 7f * dpiScale;
                     float totalH = boxH + arrowH;
-                    float cornerR = Math.Min(8f, Math.Min(boxW, boxH) / 3f);
+                    float cornerR = Math.Min(8f * dpiScale, Math.Min(boxW, boxH) / 3f);
                     float diam = cornerR * 2f;
 
                     float drawX = anchorPxX - (boxW / 2f);
                     float drawY = anchorPxY - totalH;
 
-                    float minLeft = 4f;
-                    float maxRight = surfaceW - 4f;
-                    float minTop = 4f;
-                    float maxBottom = surfaceH - 4f;
+                    float marginPx = 4f * dpiScale;
+                    float minLeft = marginPx;
+                    float maxRight = surfaceW - marginPx;
+                    float minTop = marginPx;
+                    float maxBottom = surfaceH - marginPx;
 
                     if (snapshot.HasStatusBounds)
                     {
@@ -1666,10 +1721,10 @@ namespace ChartPulseOverlayAgent
                         float tmpY;
                         ConvertCaptureNormToOverlayPx(snapshot.StatusBoundsX, snapshot.StatusBoundsY, snapshot.DisplaySurface, targetRect, monitorRect, out bLeft, out bTop, out tmpX, out tmpY);
                         ConvertCaptureNormToOverlayPx(snapshot.StatusBoundsX + snapshot.StatusBoundsW, snapshot.StatusBoundsY + snapshot.StatusBoundsH, snapshot.DisplaySurface, targetRect, monitorRect, out bRight, out bBottom, out tmpX, out tmpY);
-                        minLeft = Math.Max(4f, bLeft + 4f);
-                        maxRight = Math.Min(surfaceW - 4f, bRight - 4f);
-                        minTop = Math.Max(4f, bTop + 4f);
-                        maxBottom = Math.Min(surfaceH - 4f, bBottom - 4f);
+                        minLeft = Math.Max(marginPx, bLeft + marginPx);
+                        maxRight = Math.Min(surfaceW - marginPx, bRight - marginPx);
+                        minTop = Math.Max(marginPx, bTop + marginPx);
+                        maxBottom = Math.Min(surfaceH - marginPx, bBottom - marginPx);
                     }
 
                     drawX = Math.Max(minLeft, Math.Min(Math.Max(minLeft, maxRight - boxW), drawX));
@@ -1735,11 +1790,11 @@ namespace ChartPulseOverlayAgent
                 float tmp;
                 ConvertCaptureNormToOverlayPx(normX0, Math.Max(0.02, Math.Min(0.98, normLineY)), snapshot.DisplaySurface, targetRect, monitorRect, out lineX0, out lineY, out tmp, out tmp);
                 ConvertCaptureNormToOverlayPx(normX1, Math.Max(0.02, Math.Min(0.98, normLineY)), snapshot.DisplaySurface, targetRect, monitorRect, out lineX1, out tmp, out tmp, out tmp);
-                lineX1 = Math.Max(lineX0 + 20f, lineX1);
+                lineX1 = Math.Max(lineX0 + 20f * dpiScale, lineX1);
 
                 g.SmoothingMode = SmoothingMode.None;
-                using (Pen shadowPen = new Pen(Color.FromArgb(200, 8, 12, 18), 3f))
-                using (Pen linePen = new Pen(Color.FromArgb(255, 56, 189, 248), 2f))
+                using (Pen shadowPen = new Pen(Color.FromArgb(200, 8, 12, 18), 3f * dpiScale))
+                using (Pen linePen = new Pen(Color.FromArgb(255, 56, 189, 248), 2f * dpiScale))
                 {
                     g.DrawLine(shadowPen, lineX0, lineY, lineX1, lineY);
                     g.DrawLine(linePen, lineX0, lineY, lineX1, lineY);
@@ -1778,13 +1833,16 @@ namespace ChartPulseOverlayAgent
                         : Color.FromArgb(255, 251, 191, 36));
 
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                float outerR = 8f * dpiScale;
+                float ringR = 7f * dpiScale;
+                float coreR = 3f * dpiScale;
                 using (SolidBrush outerDark = new SolidBrush(Color.FromArgb(220, 11, 14, 17)))
-                using (Pen ringPen = new Pen(markerColor, 2f))
+                using (Pen ringPen = new Pen(markerColor, 2f * dpiScale))
                 using (SolidBrush coreBrush = new SolidBrush(markerColor))
                 {
-                    g.FillEllipse(outerDark, cx - 8f, cy - 8f, 16f, 16f);
-                    g.DrawEllipse(ringPen, cx - 7f, cy - 7f, 14f, 14f);
-                    g.FillEllipse(coreBrush, cx - 3f, cy - 3f, 6f, 6f);
+                    g.FillEllipse(outerDark, cx - outerR, cy - outerR, outerR * 2f, outerR * 2f);
+                    g.DrawEllipse(ringPen, cx - ringR, cy - ringR, ringR * 2f, ringR * 2f);
+                    g.FillEllipse(coreBrush, cx - coreR, cy - coreR, coreR * 2f, coreR * 2f);
                 }
             }
         }
@@ -1830,7 +1888,7 @@ namespace ChartPulseOverlayAgent
 
             Label header = new Label
             {
-                Text = "Escolha a janela da corretora onde o overlay transparente deve ser fixado:",
+                Text = "Escolha qualquer corretora, navegador ou plataforma de gráficos para o overlay:",
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
                 AutoSize = true,
                 Location = new Point(16, 14)
@@ -1849,7 +1907,7 @@ namespace ChartPulseOverlayAgent
 
             _infoLabel = new Label
             {
-                Text = "Janelas marcadas com [CORRETORA] foram detectadas automaticamente.",
+                Text = "Todas as janelas abertas são listadas (web, TradingView, MetaTrader, exchanges, etc.).",
                 Font = new Font("Segoe UI", 8.5f),
                 ForeColor = Color.FromArgb(148, 163, 184),
                 AutoSize = true,
@@ -1883,7 +1941,7 @@ namespace ChartPulseOverlayAgent
             autoBtn.Click += (s, e) =>
             {
                 _overlayForm.ClearManualBrokerSelection();
-                _infoLabel.Text = "Modo automático reativado (detecção dinâmica da corretora).";
+                _infoLabel.Text = "Modo automático reativado (acompanha a janela ativa selecionada).";
             };
 
             Button refreshBtn = new Button
@@ -1981,8 +2039,8 @@ namespace ChartPulseOverlayAgent
 
             ContextMenuStrip menu = new ContextMenuStrip();
             _targetInfoItem = new ToolStripMenuItem("Alvo: Modo Automático") { Enabled = false };
-            ToolStripMenuItem selectWindowItem = new ToolStripMenuItem("Selecionar janela da corretora...");
-            ToolStripMenuItem autoModeItem = new ToolStripMenuItem("Modo Automático (Detectar Corretora)");
+            ToolStripMenuItem selectWindowItem = new ToolStripMenuItem("Selecionar janela da plataforma/corretora...");
+            ToolStripMenuItem autoModeItem = new ToolStripMenuItem("Modo Automático (Janela Ativa)");
             ToolStripMenuItem openLogsItem = new ToolStripMenuItem("Abrir pasta de logs (overlay-debug.log)");
             ToolStripMenuItem exitItem = new ToolStripMenuItem("Sair do Overlay");
 

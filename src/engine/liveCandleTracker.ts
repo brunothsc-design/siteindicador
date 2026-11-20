@@ -162,7 +162,16 @@ function detectLiveMovingCandleCore(
     bear: number;
     mono: number;
     bestRun: number;
+    segmentCount: number;
     activeRows: number[];
+  }
+
+  interface VertSeg {
+    startPy: number;
+    endPy: number;
+    bull: number;
+    bear: number;
+    mono: number;
   }
 
   const validCols: ColStats[] = [];
@@ -171,20 +180,8 @@ function detectLiveMovingCandleCore(
   for (let px = bx0 + 2; px <= bx1 - 2; px++) {
     let run = 0;
     let runStartPy = -1;
-    let bestRun = 0;
-    let bull = 0;
-    let bear = 0;
-    let mono = 0;
-    let minPy = height;
-    let maxPy = -1;
-    const activeRows: number[] = [];
-
-    let tinyRun = 0;
-    let tinyBull = 0;
-    let tinyBear = 0;
-    let tinyMinPy = height;
-    let tinyMaxPy = -1;
-    const tinyRows: number[] = [];
+    const rawSegs: VertSeg[] = [];
+    const tinySegs: VertSeg[] = [];
 
     const commitRun = (startPy: number, endPy: number) => {
       const len = endPy - startPy + 1;
@@ -202,24 +199,9 @@ function detectLiveMovingCandleCore(
       }
 
       if (len >= 3) {
-        if (len > bestRun) bestRun = len;
-        if (startPy < minPy) minPy = startPy;
-        if (endPy > maxPy) maxPy = endPy;
-        bull += segBull;
-        bear += segBear;
-        mono += segMono;
-        for (let r = startPy; r <= endPy; r++) {
-          activeRows.push(r);
-        }
+        rawSegs.push({ startPy, endPy, bull: segBull, bear: segBear, mono: segMono });
       } else if (len === 2 && (segBull >= 2 || segBear >= 2)) {
-        tinyRun = Math.max(tinyRun, 2);
-        tinyBull += segBull;
-        tinyBear += segBear;
-        if (startPy < tinyMinPy) tinyMinPy = startPy;
-        if (endPy > tinyMaxPy) tinyMaxPy = endPy;
-        for (let r = startPy; r <= endPy; r++) {
-          tinyRows.push(r);
-        }
+        tinySegs.push({ startPy, endPy, bull: segBull, bear: segBear, mono: 0 });
       }
     };
 
@@ -238,19 +220,82 @@ function detectLiveMovingCandleCore(
       commitRun(runStartPy, by1 - 2);
     }
 
+    // Separate candlestick body from disconnected lower volume histogram bar when a large vertical gap exists
+    let segs = rawSegs;
+    const volGapPx = Math.max(24, Math.round(plotH * 0.16));
+    if (rawSegs.length >= 2) {
+      for (let i = 1; i < rawSegs.length; i++) {
+        if (
+          rawSegs[i].startPy - rawSegs[i - 1].endPy >= volGapPx &&
+          rawSegs[i].endPy >= by0 + plotH * 0.72 &&
+          rawSegs[i - 1].endPy < by0 + plotH * 0.72
+        ) {
+          segs = rawSegs.slice(0, i);
+          break;
+        }
+      }
+    }
+
+    let bestRun = 0;
+    let bull = 0;
+    let bear = 0;
+    let mono = 0;
+    let minPy = height;
+    let maxPy = -1;
+    const activeRows: number[] = [];
+    for (const seg of segs) {
+      const len = seg.endPy - seg.startPy + 1;
+      if (len > bestRun) bestRun = len;
+      if (seg.startPy < minPy) minPy = seg.startPy;
+      if (seg.endPy > maxPy) maxPy = seg.endPy;
+      bull += seg.bull;
+      bear += seg.bear;
+      mono += seg.mono;
+      for (let r = seg.startPy; r <= seg.endPy; r++) {
+        activeRows.push(r);
+      }
+    }
+
     if (bestRun >= 3 && activeRows.length >= 3) {
-      validCols.push({ px, minPy, maxPy, bull, bear, mono, bestRun, activeRows });
-    } else if (tinyRun === 2 && tinyRows.length >= 2) {
-      tinyColoredCols.push({
+      validCols.push({
         px,
-        minPy: tinyMinPy,
-        maxPy: tinyMaxPy,
-        bull: tinyBull,
-        bear: tinyBear,
-        mono: 0,
-        bestRun: 2,
-        activeRows: tinyRows,
+        minPy,
+        maxPy,
+        bull,
+        bear,
+        mono,
+        bestRun,
+        segmentCount: segs.length,
+        activeRows,
       });
+    } else if (tinySegs.length > 0) {
+      let tinyBull = 0;
+      let tinyBear = 0;
+      let tinyMinPy = height;
+      let tinyMaxPy = -1;
+      const tinyRows: number[] = [];
+      for (const seg of tinySegs) {
+        tinyBull += seg.bull;
+        tinyBear += seg.bear;
+        if (seg.startPy < tinyMinPy) tinyMinPy = seg.startPy;
+        if (seg.endPy > tinyMaxPy) tinyMaxPy = seg.endPy;
+        for (let r = seg.startPy; r <= seg.endPy; r++) {
+          tinyRows.push(r);
+        }
+      }
+      if (tinyRows.length >= 2) {
+        tinyColoredCols.push({
+          px,
+          minPy: tinyMinPy,
+          maxPy: tinyMaxPy,
+          bull: tinyBull,
+          bear: tinyBear,
+          mono: 0,
+          bestRun: 2,
+          segmentCount: tinySegs.length,
+          activeRows: tinyRows,
+        });
+      }
     }
   }
 
@@ -383,6 +428,8 @@ function detectLiveMovingCandleCore(
     let clusterBull = 0;
     let clusterBear = 0;
     let clusterMono = 0;
+    let segSum = 0;
+    let bestRunMax = 0;
     for (const col of c) {
       clusterBull += col.bull;
       clusterBear += col.bear;
@@ -394,9 +441,16 @@ function detectLiveMovingCandleCore(
       const h = col.maxPy - col.minPy + 1;
       heightSum += h;
       fillSum += col.activeRows.length / Math.max(1, h);
+      segSum += col.segmentCount;
+      if (col.bestRun > bestRunMax) bestRunMax = col.bestRun;
     }
     const avgHeight = heightSum / c.length;
     const clusterVertSpan = maxBot - minTop + 1;
+
+    if (segSum / c.length >= 3.5 && clusterVertSpan >= 40 && bestRunMax < clusterVertSpan * 0.35) {
+      baseDiag.rejectedCountdownText++;
+      return false;
+    }
 
     if (spanPx >= 18 && avgHeight <= 2.2) {
       baseDiag.rejectedHorizontalStreak++;

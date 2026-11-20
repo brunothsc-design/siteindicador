@@ -2504,6 +2504,211 @@ describe('ChartPulse AI — 8-Stage Real-Time Broker Overlay Pipeline & Non-Econ
   });
 });
 
+describe('ChartPulse AI — Universal Multi-Broker & Multi-Platform Chart Compatibility', () => {
+  const createCanvas = (w: number, h: number, bg: [number, number, number]) => {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      rgba[i * 4] = bg[0];
+      rgba[i * 4 + 1] = bg[1];
+      rgba[i * 4 + 2] = bg[2];
+      rgba[i * 4 + 3] = 255;
+    }
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+      for (let y = Math.max(0, Math.round(y0)); y <= Math.min(h - 1, Math.round(y1)); y++) {
+        for (let x = Math.max(0, Math.round(x0)); x <= Math.min(w - 1, Math.round(x1)); x++) {
+          const idx = (y * w + x) * 4;
+          rgba[idx] = c[0];
+          rgba[idx + 1] = c[1];
+          rgba[idx + 2] = c[2];
+        }
+      }
+    };
+    const strokeRect = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number], t = 1) => {
+      paint(x0, y0, x1, y0 + t - 1, c);
+      paint(x0, y1 - t + 1, x1, y1, c);
+      paint(x0, y0, x0 + t - 1, y1, c);
+      paint(x1 - t + 1, y0, x1, y1, c);
+    };
+    return { rgba, paint, strokeRect };
+  };
+
+  it('TradingView Light Mode: isolates candlestick chart from left toolbar, right Watchlist, and bottom RSI pane', () => {
+    const w = 1280;
+    const h = 720;
+    const { rgba, paint } = createCanvas(w, h, [255, 255, 255]);
+    paint(0, 0, w, 42, [248, 250, 253]);
+    paint(0, 42, 46, h, [248, 250, 253]);
+    paint(980, 42, w, h, [250, 251, 253]);
+    for (let gx = 120; gx < 920; gx += 120) paint(gx, 45, gx, 520, [240, 243, 250]);
+    for (let gy = 100; gy < 500; gy += 80) paint(50, gy, 920, gy, [240, 243, 250]);
+    for (let row = 0; row < 12; row++) {
+      const ry = 80 + row * 40;
+      paint(1020, ry + 2, 1030, ry + 12, row % 2 === 0 ? [8, 153, 129] : [242, 54, 69]);
+      paint(1140, ry - 2, 1220, ry + 14, row % 2 === 0 ? [8, 153, 129] : [242, 54, 69]);
+    }
+    let lastCx = 0;
+    for (let i = 0; i < 38; i++) {
+      const cx = 100 + i * 18;
+      const col: [number, number, number] = i % 3 !== 0 ? [8, 153, 129] : [242, 54, 69];
+      const top = i === 37 ? 210 : 220 + ((i * 11) % 90);
+      const bot = i === 37 ? 270 : top + 28 + (i % 15);
+      paint(cx + 3, top - 14, cx + 3, bot + 14, col);
+      paint(cx, top, cx + 6, bot, col);
+      lastCx = cx + 3;
+    }
+    paint(48, 535, 980, 536, [224, 227, 235]);
+    for (let x = 60; x < 900; x++) {
+      const y = Math.round(610 + Math.sin(x / 25) * 30);
+      paint(x, y, x, y + 1, [126, 87, 194]);
+    }
+    paint(50, 210, 918, 210, [8, 153, 129]);
+    paint(920, 200, 976, 220, [8, 153, 129]);
+
+    const digest = processFrameLocally(rgba, w, h, null);
+    assert.equal(digest.theme, 'LIGHT');
+    assert.equal(digest.chartDetected, true);
+    assert.ok(digest.chartBounds !== null);
+    assert.ok(digest.chartBounds.x + digest.chartBounds.width < 0.78, 'Must exclude right Watchlist');
+    assert.ok(digest.chartBounds.y + digest.chartBounds.height < 0.72, 'Must exclude bottom RSI pane');
+    assert.ok(digest.priceLine !== null && Math.abs(digest.priceLine.y * h - 210) <= 6);
+
+    const detected = detectLiveMovingCandleWithReason(rgba, w, h, digest.chartBounds, digest.priceLine, digest.chartDetected);
+    assert.equal(detected.reason, null);
+    assert.ok(detected.candle !== null);
+    assert.ok(Math.abs(detected.candle.x * w - lastCx) <= 5);
+    assert.ok(Math.abs(detected.candle.topY * h - 196) <= 5);
+
+    const anchor = computeCandleStatusAnchor(detected.candle, digest.chartBounds);
+    assert.ok(anchor !== null && anchor.y < detected.candle.topY);
+  });
+
+  it('Crypto Exchange Dark Theme (Binance/Bybit style): isolates candles from Order Book & bottom Volume bars', () => {
+    const w = 1280;
+    const h = 720;
+    const { rgba, paint } = createCanvas(w, h, [22, 26, 30]);
+    paint(0, 0, w, 48, [18, 22, 26]);
+    for (let r = 0; r < 14; r++) {
+      const ry = 100 + r * 24;
+      paint(935, ry, 945, ry + 8, r < 7 ? [246, 70, 93] : [14, 203, 129]);
+    }
+    paint(1125, 380, 1255, 420, [14, 203, 129]);
+    paint(1125, 435, 1255, 475, [246, 70, 93]);
+
+    let lastCx = 0;
+    for (let i = 0; i < 42; i++) {
+      const cx = 80 + i * 18;
+      const col: [number, number, number] = i % 2 === 0 ? [14, 203, 129] : [246, 70, 93];
+      const top = i === 41 ? 200 : 190 + ((i * 11) % 70);
+      const bot = i === 41 ? 260 : top + 26;
+      paint(cx + 3, top - 10, cx + 3, bot + 10, col);
+      paint(cx, top, cx + 6, bot, col);
+      paint(cx, 540, cx + 6, 595, col); // Volume bars directly under candles
+      lastCx = cx + 3;
+    }
+
+    const digest = processFrameLocally(rgba, w, h, null);
+    assert.equal(digest.theme, 'DARK');
+    assert.equal(digest.chartDetected, true);
+    assert.ok(digest.chartBounds !== null);
+    assert.ok(digest.chartBounds.x + digest.chartBounds.width < 0.72, 'Must exclude Order Book & Order Panel');
+    assert.ok(digest.chartBounds.y + digest.chartBounds.height < 0.74, 'Must exclude bottom Volume bars');
+    assert.ok(digest.priceLine !== null && Math.abs(digest.priceLine.y * h - 260) <= 6);
+
+    const detected = detectLiveMovingCandleWithReason(rgba, w, h, digest.chartBounds, digest.priceLine, digest.chartDetected);
+    assert.ok(detected.candle !== null);
+    assert.equal(detected.candle.direction, 'BEAR');
+    assert.ok(Math.abs(detected.candle.x * w - lastCx) <= 5);
+    assert.ok(Math.abs(detected.candle.y * h - 260) <= 6);
+    assert.ok(Math.abs(detected.candle.topY * h - 190) <= 5);
+  });
+
+  it('MetaTrader #000000 Hollow Bull, Custom Blue/Orange, Light Teal/Pink, 1920x1080 & 640x480 resolutions', () => {
+    // 1. MT4/5 #000000 with Market Watch left panel and hollow green candles
+    {
+      const w = 1280;
+      const h = 720;
+      const { rgba, paint, strokeRect } = createCanvas(w, h, [0, 0, 0]);
+      paint(0, 0, 230, h, [240, 240, 240]);
+      paint(0, 0, w, 54, [240, 240, 240]);
+      let lastCx = 0;
+      for (let i = 0; i < 36; i++) {
+        const cx = 270 + i * 20;
+        const isBull = i % 2 === 0;
+        const top = i === 35 ? 220 : 230 + ((i * 11) % 85);
+        const bot = i === 35 ? 285 : top + 26;
+        const col: [number, number, number] = isBull ? [0, 255, 0] : [255, 50, 50];
+        paint(cx + 4, top - 10, cx + 4, bot + 10, col);
+        if (isBull) strokeRect(cx, top, cx + 8, bot, col, 2);
+        else paint(cx, top, cx + 8, bot, col);
+        lastCx = cx + 4;
+      }
+      const d = processFrameLocally(rgba, w, h, null);
+      assert.equal(d.chartDetected, true);
+      const c = detectLiveMovingCandle(rgba, w, h, d.chartBounds, d.priceLine);
+      assert.ok(c !== null && Math.abs(c.x * w - lastCx) <= 5);
+    }
+
+    // 2. Custom Blue/Orange at High-Res 1920x1080
+    {
+      const w = 1920;
+      const h = 1080;
+      const { rgba, paint } = createCanvas(w, h, [17, 24, 39]);
+      let lastCx = 0;
+      for (let i = 0; i < 36; i++) {
+        const cx = 200 + i * 32;
+        const col: [number, number, number] = i % 2 === 0 ? [33, 150, 243] : [255, 152, 0];
+        const top = i === 35 ? 360 : 340 + ((i * 17) % 120);
+        const bot = i === 35 ? 450 : top + 44;
+        paint(cx + 5, top - 14, cx + 5, bot + 14, col);
+        paint(cx, top, cx + 10, bot, col);
+        lastCx = cx + 5;
+      }
+      const d = processFrameLocally(rgba, w, h, null);
+      assert.equal(d.chartDetected, true);
+      const c = detectLiveMovingCandle(rgba, w, h, d.chartBounds, d.priceLine);
+      assert.ok(c !== null && Math.abs(c.x * w - lastCx) <= 8);
+    }
+
+    // 3. Compact 640x480 Light Gray with Teal/Pink candles
+    {
+      const w = 640;
+      const h = 480;
+      const { rgba, paint } = createCanvas(w, h, [243, 245, 248]);
+      let lastCx = 0;
+      for (let i = 0; i < 24; i++) {
+        const cx = 60 + i * 18;
+        const col: [number, number, number] = i % 2 === 1 ? [0, 150, 136] : [233, 30, 99];
+        const top = i === 23 ? 170 : 180 + ((i * 9) % 50);
+        const bot = i === 23 ? 220 : top + 22;
+        paint(cx + 2, top - 6, cx + 2, bot + 6, col);
+        paint(cx, top, cx + 5, bot, col);
+        lastCx = cx + 2;
+      }
+      const d = processFrameLocally(rgba, w, h, null);
+      assert.equal(d.chartDetected, true);
+      assert.equal(d.theme, 'LIGHT');
+      const c = detectLiveMovingCandle(rgba, w, h, d.chartBounds, d.priceLine);
+      assert.ok(c !== null && Math.abs(c.x * w - lastCx) <= 5);
+    }
+  });
+
+  it('Windows native overlay avoids broker-keyword foreground hijacking and scales dynamically via GetDpiForWindow', () => {
+    const cs = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(cs, /GetDpiForWindow/);
+    assert.match(cs, /GetEffectiveWindowDpi/);
+    assert.match(cs, /windowDpi/);
+    assert.match(cs, /dpiScale/);
+    assert.doesNotMatch(cs, /if\s*\(\s*!currentValid\s*\|\|\s*!IsBrokerWindowTitle\(targetTitle\)\s*\)/);
+    assert.match(cs, /TradingView/);
+    assert.match(cs, /MetaTrader/);
+    assert.match(cs, /Binance/);
+  });
+});
+
+
 
 
 

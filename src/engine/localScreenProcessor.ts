@@ -219,6 +219,11 @@ export function processFrameLocally(
         continue; // Wide UI button, right-axis price pill, or panel bar — not a candle
       }
 
+      // Skip full-height 1-cell monochrome vertical grid lines / crosshairs so they don't expand bounds
+      if (!isChroma && horizRun <= 1 && vertRun >= Math.round(GRID_H * 0.58)) {
+        continue;
+      }
+
       // Check vertical stroke continuity (candle body or wick, +-1 cells)
       const hasVertNeighbor =
         chromaCandleMask[(gy - 1) * GRID_W + gx] === 1 ||
@@ -231,18 +236,111 @@ export function processFrameLocally(
         const weight = isChroma ? 1 : 0.65;
         totalCandleSamples += weight;
         candleHitsX[gx] += weight;
-        candleHitsY[gy] += weight;
       }
     }
   }
 
-  // Isolate the contiguous horizontal chart cluster (ignore isolated outlier icons on far left/right toolbars)
-  let activeColumns = 0;
-  const activeColIndices: number[] = [];
+  // Isolate the dominant contiguous horizontal candlestick cluster
+  // (separates sidebars, toolbars, Order Books, and Watchlists separated by UI gutters/axes)
+  const rawActiveCols: number[] = [];
   for (let gx = 0; gx < GRID_W; gx++) {
     if (candleHitsX[gx] >= 1) {
-      activeColumns++;
-      activeColIndices.push(gx);
+      rawActiveCols.push(gx);
+    }
+  }
+
+  interface GridSegment {
+    minIdx: number;
+    maxIdx: number;
+    count: number;
+    hits: number;
+  }
+
+  let minGx = GRID_W;
+  let maxGx = -1;
+  if (rawActiveCols.length > 0) {
+    const hSegments: GridSegment[] = [];
+    let segMin = rawActiveCols[0];
+    let segMax = rawActiveCols[0];
+    let segCount = 1;
+    let segHits = candleHitsX[rawActiveCols[0]];
+
+    for (let i = 1; i < rawActiveCols.length; i++) {
+      const gx = rawActiveCols[i];
+      if (gx - rawActiveCols[i - 1] <= 14) {
+        segMax = gx;
+        segCount++;
+        segHits += candleHitsX[gx];
+      } else {
+        hSegments.push({ minIdx: segMin, maxIdx: segMax, count: segCount, hits: segHits });
+        segMin = gx;
+        segMax = gx;
+        segCount = 1;
+        segHits = candleHitsX[gx];
+      }
+    }
+    hSegments.push({ minIdx: segMin, maxIdx: segMax, count: segCount, hits: segHits });
+
+    let bestHSeg = hSegments[0];
+    let bestHScore = -1;
+    for (const seg of hSegments) {
+      const span = seg.maxIdx - seg.minIdx + 1;
+      const viabilityBonus = seg.count >= 4 && span >= 16 ? 1.5 : 0.5;
+      const score = seg.hits * Math.sqrt(Math.max(1, span)) * viabilityBonus;
+      if (score > bestHScore) {
+        bestHScore = score;
+        bestHSeg = seg;
+      }
+    }
+    minGx = bestHSeg.minIdx;
+    maxGx = bestHSeg.maxIdx;
+  }
+
+  let activeColumns = 0;
+  for (let gx = Math.max(0, minGx); gx <= Math.min(GRID_W - 1, maxGx); gx++) {
+    if (candleHitsX[gx] >= 1) activeColumns++;
+  }
+
+  // Compute vertical hits strictly inside the isolated horizontal candlestick plot [minGx..maxGx]
+  // so Order Books, Watchlists, and sidebars cannot inflate vertical bounds, and split off bottom RSI/MACD sub-panes.
+  if (maxGx >= minGx) {
+    for (let gy = 3; gy <= GRID_H - 4; gy++) {
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const idx = gy * GRID_W + gx;
+        const isChroma = chromaCandleMask[idx] === 1;
+        const isContrast = contrastMask[idx] === 1;
+        if (!isChroma && !isContrast) continue;
+
+        let horizRun = 1;
+        for (let lx = gx - 1; lx >= Math.max(0, gx - 16); lx--) {
+          if (contrastMask[gy * GRID_W + lx] || chromaCandleMask[gy * GRID_W + lx]) horizRun++;
+          else break;
+        }
+        for (let rx = gx + 1; rx <= Math.min(GRID_W - 1, gx + 16); rx++) {
+          if (contrastMask[gy * GRID_W + rx] || chromaCandleMask[gy * GRID_W + rx]) horizRun++;
+          else break;
+        }
+        let vertRun = 1;
+        for (let uy = gy - 1; uy >= Math.max(0, gy - 16); uy--) {
+          if (contrastMask[uy * GRID_W + gx] || chromaCandleMask[uy * GRID_W + gx]) vertRun++;
+          else break;
+        }
+        for (let dy = gy + 1; dy <= Math.min(GRID_H - 1, gy + 16); dy++) {
+          if (contrastMask[dy * GRID_W + gx] || chromaCandleMask[dy * GRID_W + gx]) vertRun++;
+          else break;
+        }
+        if (horizRun >= 14 || (horizRun >= 7 && horizRun > vertRun * 1.8)) continue;
+        if (!isChroma && horizRun <= 1 && vertRun >= Math.round(GRID_H * 0.58)) continue;
+
+        const hasVertNeighbor =
+          chromaCandleMask[(gy - 1) * GRID_W + gx] === 1 ||
+          chromaCandleMask[(gy + 1) * GRID_W + gx] === 1 ||
+          contrastMask[(gy - 1) * GRID_W + gx] === 1 ||
+          contrastMask[(gy + 1) * GRID_W + gx] === 1;
+        if (isChroma || (isContrast && hasVertNeighbor && horizRun <= 8)) {
+          candleHitsY[gy] += isChroma ? 1 : 0.65;
+        }
+      }
     }
   }
 
@@ -253,33 +351,61 @@ export function processFrameLocally(
     }
   }
 
-  // Trim isolated extreme outlier UI icons only if enough columns/rows exist
-  let minGx = GRID_W;
-  let maxGx = -1;
-  if (activeColIndices.length >= 6) {
-    let startIdx = 0;
-    let endIdx = activeColIndices.length - 1;
-    if (activeColIndices[1] - activeColIndices[0] >= 16) startIdx = 1;
-    if (activeColIndices[endIdx] - activeColIndices[endIdx - 1] >= 16) endIdx--;
-    minGx = activeColIndices[startIdx];
-    maxGx = activeColIndices[endIdx];
-  } else if (activeColIndices.length > 0) {
-    minGx = activeColIndices[0];
-    maxGx = activeColIndices[activeColIndices.length - 1];
-  }
-
   let minGy = GRID_H;
   let maxGy = -1;
-  if (activeRowIndices.length >= 4) {
-    let startIdx = 0;
-    let endIdx = activeRowIndices.length - 1;
-    if (activeRowIndices[1] - activeRowIndices[0] >= 14) startIdx = 1;
-    if (activeRowIndices[endIdx] - activeRowIndices[endIdx - 1] >= 14) endIdx--;
-    minGy = activeRowIndices[startIdx];
-    maxGy = activeRowIndices[endIdx];
-  } else if (activeRowIndices.length > 0) {
-    minGy = activeRowIndices[0];
-    maxGy = activeRowIndices[activeRowIndices.length - 1];
+  if (activeRowIndices.length > 0) {
+    const vSegments: GridSegment[] = [];
+    let segMin = activeRowIndices[0];
+    let segMax = activeRowIndices[0];
+    let segCount = 1;
+    let segHits = candleHitsY[activeRowIndices[0]];
+
+    for (let i = 1; i < activeRowIndices.length; i++) {
+      const gy = activeRowIndices[i];
+      if (gy - activeRowIndices[i - 1] <= 15) {
+        segMax = gy;
+        segCount++;
+        segHits += candleHitsY[gy];
+      } else {
+        vSegments.push({ minIdx: segMin, maxIdx: segMax, count: segCount, hits: segHits });
+        segMin = gy;
+        segMax = gy;
+        segCount = 1;
+        segHits = candleHitsY[gy];
+      }
+    }
+    vSegments.push({ minIdx: segMin, maxIdx: segMax, count: segCount, hits: segHits });
+
+    let maxBandHits = 0;
+    for (const seg of vSegments) {
+      if (seg.hits > maxBandHits) maxBandHits = seg.hits;
+    }
+
+    const hasUpperChart = vSegments.some(
+      (seg) =>
+        seg.minIdx < Math.round(GRID_H * 0.72) &&
+        seg.maxIdx - seg.minIdx + 1 >= 6 &&
+        seg.hits >= Math.max(8, maxBandHits * 0.22)
+    );
+
+    const keptVSegments = vSegments.filter((seg, idx) => {
+      const spanRows = seg.maxIdx - seg.minIdx + 1;
+      const isBottomSubPane = hasUpperChart && idx === vSegments.length - 1 && seg.minIdx >= Math.round(GRID_H * 0.72);
+      const isTinyTopUi = vSegments.length > 1 && idx === 0 && seg.maxIdx <= 12 && spanRows <= 5 && seg.hits < maxBandHits * 0.15;
+      return !isBottomSubPane && !isTinyTopUi;
+    });
+
+    const finalVSegments = keptVSegments.length > 0 ? keptVSegments : vSegments;
+    minGy = finalVSegments[0].minIdx;
+    maxGy = finalVSegments[finalVSegments.length - 1].maxIdx;
+  }
+
+  // Recount totalCandleSamples inside isolated chart bounds so non-chart UI counts accurately
+  totalCandleSamples = 0;
+  if (maxGx >= minGx && maxGy >= minGy) {
+    for (let gx = minGx; gx <= maxGx; gx++) {
+      totalCandleSamples += candleHitsX[gx];
+    }
   }
 
   const candleDensityScore = totalCandleSamples / (GRID_W * GRID_H);
@@ -472,7 +598,16 @@ function findRightmostCandle(
     bear: number;
     mono: number;
     bestRun: number;
+    segmentCount: number;
     activeRows: number[];
+  }
+
+  interface VertSeg {
+    startPy: number;
+    endPy: number;
+    bull: number;
+    bear: number;
+    mono: number;
   }
 
   const validCols: ColStats[] = [];
@@ -482,20 +617,8 @@ function findRightmostCandle(
   for (let px = bx0 + 2; px <= bx1 - 2; px++) {
     let run = 0;
     let runStartPy = -1;
-    let bestRun = 0;
-    let bull = 0;
-    let bear = 0;
-    let mono = 0;
-    let minPy = height;
-    let maxPy = -1;
-    const activeRows: number[] = [];
-
-    let tinyRun = 0;
-    let tinyBull = 0;
-    let tinyBear = 0;
-    let tinyMinPy = height;
-    let tinyMaxPy = -1;
-    const tinyRows: number[] = [];
+    const rawSegs: VertSeg[] = [];
+    const tinySegs: VertSeg[] = [];
 
     const commitRun = (startPy: number, endPy: number) => {
       const len = endPy - startPy + 1;
@@ -513,24 +636,9 @@ function findRightmostCandle(
       }
 
       if (len >= 3) {
-        if (len > bestRun) bestRun = len;
-        if (startPy < minPy) minPy = startPy;
-        if (endPy > maxPy) maxPy = endPy;
-        bull += segBull;
-        bear += segBear;
-        mono += segMono;
-        for (let r = startPy; r <= endPy; r++) {
-          activeRows.push(r);
-        }
+        rawSegs.push({ startPy, endPy, bull: segBull, bear: segBear, mono: segMono });
       } else if (len === 2 && (segBull >= 2 || segBear >= 2)) {
-        tinyRun = Math.max(tinyRun, 2);
-        tinyBull += segBull;
-        tinyBear += segBear;
-        if (startPy < tinyMinPy) tinyMinPy = startPy;
-        if (endPy > tinyMaxPy) tinyMaxPy = endPy;
-        for (let r = startPy; r <= endPy; r++) {
-          tinyRows.push(r);
-        }
+        tinySegs.push({ startPy, endPy, bull: segBull, bear: segBear, mono: 0 });
       }
     };
 
@@ -549,19 +657,83 @@ function findRightmostCandle(
       commitRun(runStartPy, by1 - 2);
     }
 
+    // Separate candlestick body from disconnected lower volume histogram bar when a large vertical gap exists
+    let segs = rawSegs;
+    const plotH = by1 - by0 + 1;
+    const volGapPx = Math.max(24, Math.round(plotH * 0.16));
+    if (rawSegs.length >= 2) {
+      for (let i = 1; i < rawSegs.length; i++) {
+        if (
+          rawSegs[i].startPy - rawSegs[i - 1].endPy >= volGapPx &&
+          rawSegs[i].endPy >= by0 + plotH * 0.72 &&
+          rawSegs[i - 1].endPy < by0 + plotH * 0.72
+        ) {
+          segs = rawSegs.slice(0, i);
+          break;
+        }
+      }
+    }
+
+    let bestRun = 0;
+    let bull = 0;
+    let bear = 0;
+    let mono = 0;
+    let minPy = height;
+    let maxPy = -1;
+    const activeRows: number[] = [];
+    for (const seg of segs) {
+      const len = seg.endPy - seg.startPy + 1;
+      if (len > bestRun) bestRun = len;
+      if (seg.startPy < minPy) minPy = seg.startPy;
+      if (seg.endPy > maxPy) maxPy = seg.endPy;
+      bull += seg.bull;
+      bear += seg.bear;
+      mono += seg.mono;
+      for (let r = seg.startPy; r <= seg.endPy; r++) {
+        activeRows.push(r);
+      }
+    }
+
     if (bestRun >= 3 && activeRows.length >= 3) {
-      validCols.push({ px, minPy, maxPy, bull, bear, mono, bestRun, activeRows });
-    } else if (tinyRun === 2 && tinyRows.length >= 2) {
-      tinyColoredCols.push({
+      validCols.push({
         px,
-        minPy: tinyMinPy,
-        maxPy: tinyMaxPy,
-        bull: tinyBull,
-        bear: tinyBear,
-        mono: 0,
-        bestRun: 2,
-        activeRows: tinyRows,
+        minPy,
+        maxPy,
+        bull,
+        bear,
+        mono,
+        bestRun,
+        segmentCount: segs.length,
+        activeRows,
       });
+    } else if (tinySegs.length > 0) {
+      let tinyBull = 0;
+      let tinyBear = 0;
+      let tinyMinPy = height;
+      let tinyMaxPy = -1;
+      const tinyRows: number[] = [];
+      for (const seg of tinySegs) {
+        tinyBull += seg.bull;
+        tinyBear += seg.bear;
+        if (seg.startPy < tinyMinPy) tinyMinPy = seg.startPy;
+        if (seg.endPy > tinyMaxPy) tinyMaxPy = seg.endPy;
+        for (let r = seg.startPy; r <= seg.endPy; r++) {
+          tinyRows.push(r);
+        }
+      }
+      if (tinyRows.length >= 2) {
+        tinyColoredCols.push({
+          px,
+          minPy: tinyMinPy,
+          maxPy: tinyMaxPy,
+          bull: tinyBull,
+          bear: tinyBear,
+          mono: 0,
+          bestRun: 2,
+          segmentCount: tinySegs.length,
+          activeRows: tinyRows,
+        });
+      }
     }
   }
 
@@ -634,7 +806,7 @@ function findRightmostCandle(
     }
   }
 
-  // Filter out wide solid UI bars, horizontal-only price line streaks, and flat horizontal right-axis price pills
+  // Filter out wide solid UI bars, horizontal-only price line streaks, flat right-axis pills, and stacked orderbook rows
   const candleClusters = clusters.filter((c) => {
     const spanPx = c[c.length - 1].px - c[0].px + 1;
     const totalPixels = c.reduce((acc, col) => acc + col.activeRows.length, 0);
@@ -646,6 +818,8 @@ function findRightmostCandle(
     let maxBot = -1;
     let fillSum = 0;
     let heightSum = 0;
+    let segSum = 0;
+    let bestRunMax = 0;
     for (const col of c) {
       if (col.minPy < minTop) minTop = col.minPy;
       if (col.minPy > maxTop) maxTop = col.minPy;
@@ -654,8 +828,16 @@ function findRightmostCandle(
       const h = col.maxPy - col.minPy + 1;
       heightSum += h;
       fillSum += col.activeRows.length / Math.max(1, h);
+      segSum += col.segmentCount;
+      if (col.bestRun > bestRunMax) bestRunMax = col.bestRun;
     }
     const avgHeight = heightSum / c.length;
+    const clusterVertSpan = maxBot - minTop + 1;
+
+    // Exclude stacked vertically-separated UI lists (Order Books, Watchlists, depth ladders)
+    if (segSum / c.length >= 3.5 && clusterVertSpan >= 40 && bestRunMax < clusterVertSpan * 0.35) {
+      return false;
+    }
 
     // Exclude wide 2px horizontal line streaks mistaken for candles
     if (spanPx >= 18 && avgHeight <= 2.2) {
