@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Net;
@@ -651,7 +652,7 @@ namespace ChartPulseOverlayAgent
             bool hasLiveCandle = snapshot.Active && snapshot.HasLiveCandle;
             bool hasOpStatus = snapshot.Active && snapshot.HasStatusAnchor;
 
-            if (!hasSignal && !hasPriceLine && !hasLiveCandle && !hasOpStatus)
+            if (!hasPriceLine && !hasLiveCandle && !hasOpStatus)
             {
                 return;
             }
@@ -685,23 +686,32 @@ namespace ChartPulseOverlayAgent
                         : Color.FromArgb(255, 251, 191, 36));
 
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
-                using (Font statusFont = new Font("Consolas", 11f, FontStyle.Bold))
+                g.SmoothingMode = SmoothingMode.None;
+                using (Font statusFont = new Font("Segoe UI", 12.5f, FontStyle.Bold))
                 using (SolidBrush statusBg = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
-                using (Pen statusBorder = new Pen(statusColor, 1f))
+                using (Pen statusBorder = new Pen(statusColor, 2f))
                 using (SolidBrush statusBrush = new SolidBrush(statusColor))
+                using (StringFormat centered = new StringFormat())
                 {
+                    centered.Alignment = StringAlignment.Center;
+                    centered.LineAlignment = StringAlignment.Center;
+
                     SizeF stSize = g.MeasureString(statusText, statusFont);
-                    float padX = 7f;
-                    float padY = 3f;
-                    float boxW = stSize.Width + padX * 2f;
+                    float padX = 14f;
+                    float padY = 6f;
+                    float boxW = Math.Max(104f, stSize.Width + padX * 2f);
                     float boxH = stSize.Height + padY * 2f;
+                    float arrowH = 7f;
+                    float arrowHalfW = 7f;
+                    float totalH = boxH + arrowH;
+                    float cornerR = Math.Min(8f, Math.Min(boxW, boxH) / 3f);
+                    float diam = cornerR * 2f;
 
-                    // Centered horizontally on the candle and directly above it (anchor = bottom-center)
+                    // Centered horizontally on the forming M1 candle and directly above it (arrow tip at anchorPxY)
                     float drawX = anchorPxX - (boxW / 2f);
-                    float drawY = anchorPxY - boxH;
+                    float drawY = anchorPxY - totalH;
 
-                    // Strictly clamp inside chartBounds (or window client area) so indicator never overflows
+                    // Strictly clamp inside chartBounds (or window client area) so callout never overflows
                     float minLeft = snapshot.HasStatusBounds
                         ? (float)(snapshot.StatusBoundsX * ClientSize.Width) + 4f
                         : 4f;
@@ -716,12 +726,29 @@ namespace ChartPulseOverlayAgent
                         : ClientSize.Height - 4f;
 
                     drawX = Math.Max(minLeft, Math.Min(Math.Max(minLeft, maxRight - boxW), drawX));
-                    drawY = Math.Max(minTop, Math.Min(Math.Max(minTop, maxBottom - boxH), drawY));
+                    drawY = Math.Max(minTop, Math.Min(Math.Max(minTop, maxBottom - totalH), drawY));
 
-                    RectangleF box = new RectangleF(drawX, drawY, boxW, boxH);
-                    g.FillRectangle(statusBg, box);
-                    g.DrawRectangle(statusBorder, box.X, box.Y, box.Width, box.Height);
-                    g.DrawString(statusText, statusFont, statusBrush, drawX + padX, drawY + padY);
+                    float tipX = Math.Max(drawX + cornerR + arrowHalfW, Math.Min(drawX + boxW - cornerR - arrowHalfW, anchorPxX));
+                    float boxBot = drawY + boxH;
+
+                    using (GraphicsPath callout = new GraphicsPath())
+                    {
+                        callout.AddArc(drawX, drawY, diam, diam, 180f, 90f);
+                        callout.AddArc(drawX + boxW - diam, drawY, diam, diam, 270f, 90f);
+                        callout.AddArc(drawX + boxW - diam, boxBot - diam, diam, diam, 0f, 90f);
+                        callout.AddLine(drawX + boxW - cornerR, boxBot, tipX + arrowHalfW, boxBot);
+                        callout.AddLine(tipX + arrowHalfW, boxBot, tipX, boxBot + arrowH);
+                        callout.AddLine(tipX, boxBot + arrowH, tipX - arrowHalfW, boxBot);
+                        callout.AddLine(tipX - arrowHalfW, boxBot, drawX + cornerR, boxBot);
+                        callout.AddArc(drawX, boxBot - diam, diam, diam, 90f, 90f);
+                        callout.CloseFigure();
+
+                        g.FillPath(statusBg, callout);
+                        g.DrawPath(statusBorder, callout);
+                    }
+
+                    RectangleF textRect = new RectangleF(drawX, drawY, boxW, boxH);
+                    g.DrawString(statusText, statusFont, statusBrush, textRect, centered);
                 }
             }
 
@@ -739,7 +766,7 @@ namespace ChartPulseOverlayAgent
                     ? (float)(Math.Max(lineX0 + 20f, Math.Min(1.0, snapshot.PriceBoundsX + snapshot.PriceBoundsW) * ClientSize.Width))
                     : (float)(0.92 * ClientSize.Width);
 
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                g.SmoothingMode = SmoothingMode.None;
                 using (Pen shadowPen = new Pen(Color.FromArgb(255, 8, 12, 18), 1f))
                 using (Pen linePen = new Pen(Color.FromArgb(255, 56, 189, 248), 2f))
                 {
@@ -766,7 +793,7 @@ namespace ChartPulseOverlayAgent
                         ? Color.FromArgb(255, 244, 63, 94)
                         : Color.FromArgb(255, 251, 191, 36));
 
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                g.SmoothingMode = SmoothingMode.None;
                 using (SolidBrush outerDark = new SolidBrush(Color.FromArgb(255, 11, 14, 17)))
                 using (Pen ringPen = new Pen(markerColor, 2f))
                 using (SolidBrush coreBrush = new SolidBrush(markerColor))
@@ -774,35 +801,6 @@ namespace ChartPulseOverlayAgent
                     g.FillEllipse(outerDark, cx - 8f, cy - 8f, 16f, 16f);
                     g.DrawEllipse(ringPen, cx - 7f, cy - 7f, 14f, 14f);
                     g.FillEllipse(coreBrush, cx - 3f, cy - 3f, 6f, 6f);
-                }
-            }
-
-            if (hasSignal)
-            {
-                double normX = snapshot.HasBounds
-                    ? snapshot.BoundsX + snapshot.ChartRelativeX * snapshot.BoundsW
-                    : snapshot.CandleX;
-                double normY = snapshot.HasBounds
-                    ? snapshot.BoundsY + snapshot.ChartRelativeY * snapshot.BoundsH
-                    : snapshot.CandleY;
-
-                float x = (float)(Math.Max(0.02, Math.Min(0.98, normX)) * ClientSize.Width);
-                float y = (float)(Math.Max(0.02, Math.Min(0.98, normY)) * ClientSize.Height);
-
-                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-
-                using (Font font = new Font("Consolas", 13f, FontStyle.Bold))
-                using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(245, 5, 5, 5)))
-                using (SolidBrush textBrush = new SolidBrush(
-                    snapshot.Direction == "COMPRA"
-                        ? Color.FromArgb(255, 34, 197, 94)
-                        : Color.FromArgb(255, 239, 68, 68)))
-                {
-                    SizeF size = g.MeasureString(snapshot.Direction, font);
-                    float drawX = x - (size.Width / 2f);
-                    float drawY = y - (size.Height / 2f);
-                    g.DrawString(snapshot.Direction, font, shadowBrush, drawX + 1f, drawY + 1f);
-                    g.DrawString(snapshot.Direction, font, textBrush, drawX, drawY);
                 }
             }
         }

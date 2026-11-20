@@ -2,6 +2,7 @@ import { isSignalConfidenceValid } from '../config/signalConfig.ts';
 import type {
   LiveCandleTracker,
   OperationalStatusState,
+  OperationalStatusValue,
   PriceLine,
   VisualSignal,
 } from '../types/signals.ts';
@@ -35,7 +36,7 @@ export function SignalOverlay({
   const statusAnchor = operationalStatus?.anchor ?? null;
   if (
     !active ||
-    (!validSignal && !priceLine && !liveCandle && !statusAnchor) ||
+    (!priceLine && !liveCandle && !statusAnchor) ||
     !rect ||
     rect.width <= 0 ||
     rect.height <= 0
@@ -71,7 +72,13 @@ export function SignalOverlay({
         ? '#F43F5E'
         : '#FBBF24';
 
-  const statusBounds = operationalStatus?.chartBounds ?? candleBounds ?? lineBounds ?? validSignal?.chartBounds ?? null;
+  const statusBounds =
+    operationalStatus?.chartBounds ??
+    candleBounds ??
+    lineBounds ??
+    validSignal?.chartBounds ??
+    null;
+
   let statusLeft = statusAnchor
     ? statusBounds
       ? statusBounds.x + statusAnchor.chartRelativeX * statusBounds.width
@@ -87,30 +94,25 @@ export function SignalOverlay({
     const padX = Math.min(0.012, statusBounds.width * 0.04);
     const minLeft = statusBounds.x + padX;
     const maxLeft = Math.max(minLeft, statusBounds.x + statusBounds.width - padX);
-    const minTop = statusBounds.y + Math.min(0.045, statusBounds.height * 0.16);
+    const minTop = statusBounds.y + Math.min(0.068, statusBounds.height * 0.2);
     const maxTop = Math.max(minTop, statusBounds.y + statusBounds.height - 0.015);
     statusLeft = Math.max(minLeft, Math.min(maxLeft, statusLeft));
     statusTop = Math.max(minTop, Math.min(maxTop, statusTop));
   }
 
+  const displayStatus: OperationalStatusValue =
+    operationalStatus?.status === 'COMPRA' || operationalStatus?.status === 'VENDA'
+      ? operationalStatus.status
+      : validSignal
+        ? validSignal.direction
+        : 'AGUARDANDO';
+
   const statusColor =
-    operationalStatus?.status === 'COMPRA'
+    displayStatus === 'COMPRA'
       ? '#22C55E'
-      : operationalStatus?.status === 'VENDA'
+      : displayStatus === 'VENDA'
         ? '#EF4444'
         : '#FBBF24';
-
-  const isBuy = validSignal?.direction === 'COMPRA';
-  const posX = validSignal
-    ? validSignal.chartBounds
-      ? validSignal.chartBounds.x + validSignal.chartRelativeX * validSignal.chartBounds.width
-      : validSignal.candleX
-    : 0;
-  const posY = validSignal
-    ? validSignal.chartBounds
-      ? validSignal.chartBounds.y + validSignal.chartRelativeY * validSignal.chartBounds.height
-      : validSignal.candleY
-    : 0;
 
   return (
     <div
@@ -123,20 +125,42 @@ export function SignalOverlay({
         height: `${rect.height}px`,
       }}
     >
-      {operationalStatus && statusAnchor && (
+      {statusAnchor && (
         <div
-          className="absolute font-mono font-bold tracking-wider text-xs sm:text-sm px-2 py-0.5 rounded whitespace-nowrap transition-[left,top,color,border-color] duration-200 ease-out"
+          data-status-callout={displayStatus}
+          className="absolute flex flex-col items-center transition-[left,top] duration-200 ease-out"
           style={{
             left: `${statusLeft * 100}%`,
             top: `${statusTop * 100}%`,
             transform: 'translate(-50%, -100%)',
-            color: statusColor,
-            backgroundColor: 'rgba(11, 14, 17, 0.78)',
-            border: `1px solid ${statusColor}`,
-            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.85)',
           }}
         >
-          {operationalStatus.status}
+          <div
+            className="rounded-lg font-sans font-extrabold tracking-wider text-sm sm:text-base px-3.5 py-1.5 text-center whitespace-nowrap transition-colors duration-150"
+            style={{
+              color: statusColor,
+              backgroundColor: 'rgba(11, 14, 17, 0.94)',
+              border: `2px solid ${statusColor}`,
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.85)',
+            }}
+          >
+            {displayStatus}
+          </div>
+          <svg
+            width="16"
+            height="8"
+            viewBox="0 0 16 8"
+            className="-mt-[2px] block overflow-visible"
+          >
+            <polygon points="1,0 15,0 8,7" fill="rgba(11, 14, 17, 0.94)" />
+            <polyline
+              points="1,0 8,7 15,0"
+              fill="none"
+              stroke={statusColor}
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+          </svg>
         </div>
       )}
 
@@ -175,21 +199,6 @@ export function SignalOverlay({
               style={{ backgroundColor: liveColor }}
             />
           </div>
-        </div>
-      )}
-
-      {validSignal && (
-        <div
-          className="absolute -translate-x-1/2 -translate-y-1/2 font-mono font-bold tracking-wider text-sm sm:text-base transition-opacity duration-150"
-          style={{
-            left: `${posX * 100}%`,
-            top: `${posY * 100}%`,
-            color: isBuy ? '#22C55E' : '#EF4444',
-            textShadow:
-              '0 1px 2px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,1)',
-          }}
-        >
-          {validSignal.direction}
         </div>
       )}
     </div>

@@ -55,8 +55,8 @@ export function computeCandleStatusAnchor(
     const maxX = bounds.x + bounds.width - marginX;
     clampedX = clamp(rawCandleX, minX, maxX);
 
-    // Keep badge inside chartBounds: leave room at top for badge height (~0.045 norm)
-    const minY = bounds.y + Math.min(0.045, bounds.height * 0.16);
+    // Keep callout badge + downward arrow inside chartBounds
+    const minY = bounds.y + Math.min(0.068, bounds.height * 0.2);
     const maxY = bounds.y + bounds.height - 0.015;
     clampedY = clamp(rawAnchorY, minY, maxY);
 

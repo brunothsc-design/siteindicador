@@ -50,20 +50,21 @@ html, body { margin:0; padding:0; width:100vw; height:100vh; overflow:hidden; ba
 #line { position:fixed; height:2px; background:#38BDF8; box-shadow:0 0 4px #000,0 1px 1px #000; transform:translateY(-50%); display:none; }
 #live { position:fixed; width:16px; height:16px; border-radius:9999px; border:2px solid #FBBF24; background:rgba(11,14,17,0.45); box-shadow:0 0 6px #000; transform:translate(-50%,-50%); display:none; align-items:center; justify-content:center; }
 #liveDot { width:6px; height:6px; border-radius:9999px; background:#FBBF24; }
-#opStatus { position:fixed; transform:translate(-50%,-100%); padding:2px 8px; border-radius:4px; font:700 12px/1.2 Consolas,monospace; letter-spacing:0.06em; white-space:nowrap; background:rgba(11,14,17,0.78); box-shadow:0 2px 6px rgba(0,0,0,0.85); transition:left 200ms ease-out, top 200ms ease-out, color 150ms, border-color 150ms; display:none; }
-#sig { position:fixed; transform:translate(-50%,-50%); font:700 16px/1 Consolas,monospace; letter-spacing:0.06em; text-shadow:0 1px 2px #000,0 0 8px #000; display:none; }
+#opStatus { position:fixed; transform:translate(-50%,-100%); display:none; flex-direction:column; align-items:center; transition:left 200ms ease-out, top 200ms ease-out; }
+#opBox { padding:6px 14px; border-radius:8px; font:700 15px/1.15 system-ui,-apple-system,Segoe UI,sans-serif; letter-spacing:0.06em; text-align:center; white-space:nowrap; background:rgba(11,14,17,0.94); box-shadow:0 4px 12px rgba(0,0,0,0.85); transition:color 150ms, border-color 150ms; }
+#opArrow { margin-top:-2px; display:block; overflow:visible; }
 </style></head>
 <body>
-<div id="opStatus"></div>
+<div id="opStatus"><div id="opBox"></div><svg id="opArrow" width="16" height="8" viewBox="0 0 16 8"><polygon points="1,0 15,0 8,7" fill="rgba(11,14,17,0.94)" /><polyline id="opArrowStroke" points="1,0 8,7 15,0" fill="none" stroke="#FBBF24" stroke-width="2" stroke-linejoin="round" /></svg></div>
 <div id="line"></div>
 <div id="live"><div id="liveDot"></div></div>
-<div id="sig"></div>
 <script>
 const opEl = document.getElementById('opStatus');
+const opBoxEl = document.getElementById('opBox');
+const opArrowStrokeEl = document.getElementById('opArrowStroke');
 const lineEl = document.getElementById('line');
 const liveEl = document.getElementById('live');
 const liveDotEl = document.getElementById('liveDot');
-const el = document.getElementById('sig');
 const es = new EventSource('${APP_URL}/api/overlay/stream');
 es.onmessage = (ev) => {
   try {
@@ -72,7 +73,6 @@ es.onmessage = (ev) => {
       opEl.style.display = 'none';
       lineEl.style.display = 'none';
       liveEl.style.display = 'none';
-      el.style.display = 'none';
       return;
     }
     const anchor = s.operationalStatus && s.operationalStatus.anchor;
@@ -84,15 +84,16 @@ es.onmessage = (ev) => {
       if (sb) {
         const px = Math.min(0.012, sb.width * 0.04);
         sLeft = Math.max(sb.x + px, Math.min(sb.x + sb.width - px, sLeft));
-        sTop = Math.max(sb.y + Math.min(0.045, sb.height * 0.16), Math.min(sb.y + sb.height - 0.015, sTop));
+        sTop = Math.max(sb.y + Math.min(0.068, sb.height * 0.2), Math.min(sb.y + sb.height - 0.015, sTop));
       }
       const sColor = statusText === 'COMPRA' ? '#22C55E' : (statusText === 'VENDA' ? '#EF4444' : '#FBBF24');
-      opEl.textContent = statusText;
+      opBoxEl.textContent = statusText;
       opEl.style.left = (sLeft * 100) + '%';
       opEl.style.top = (sTop * 100) + '%';
-      opEl.style.color = sColor;
-      opEl.style.border = '1px solid ' + sColor;
-      opEl.style.display = 'block';
+      opBoxEl.style.color = sColor;
+      opBoxEl.style.border = '2px solid ' + sColor;
+      opArrowStrokeEl.setAttribute('stroke', sColor);
+      opEl.style.display = 'flex';
     } else {
       opEl.style.display = 'none';
     }
@@ -119,23 +120,13 @@ es.onmessage = (ev) => {
     } else {
       liveEl.style.display = 'none';
     }
-    if (!s.signal || (s.signal.direction !== 'COMPRA' && s.signal.direction !== 'VENDA')) {
-      el.style.display = 'none';
-      return;
-    }
-    el.textContent = s.signal.direction;
-    el.style.color = s.signal.direction === 'COMPRA' ? '#22C55E' : '#EF4444';
-    el.style.left = (s.signal.candleX * 100) + '%';
-    el.style.top = (s.signal.candleY * 100) + '%';
-    el.style.display = 'block';
   } catch {
     opEl.style.display = 'none';
     lineEl.style.display = 'none';
     liveEl.style.display = 'none';
-    el.style.display = 'none';
   }
 };
-es.onerror = () => { opEl.style.display = 'none'; lineEl.style.display = 'none'; liveEl.style.display = 'none'; el.style.display = 'none'; };
+es.onerror = () => { opEl.style.display = 'none'; lineEl.style.display = 'none'; liveEl.style.display = 'none'; };
 </script>
 </body>
 </html>`;

@@ -101,7 +101,7 @@ $form.Add_Paint({
     $opAnchor = if ($null -ne $state.operationalStatus -and $null -ne $state.operationalStatus.anchor) { $state.operationalStatus.anchor } else { $null }
     $hasOpStatus = [bool]$state.active -and ($null -ne $opAnchor)
 
-    if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasSignal -and -not $hasOpStatus) {
+    if (-not $hasPriceLine -and -not $hasLiveCandle -and -not $hasOpStatus) {
         return
     }
 
@@ -130,25 +130,51 @@ $form.Add_Paint({
 
         $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
-        $stFont = New-Object System.Drawing.Font("Consolas", 11, [System.Drawing.FontStyle]::Bold)
-        $stBg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 11, 14, 17))
-        $stBorder = New-Object System.Drawing.Pen($stColor, 1)
+        $stFont = New-Object System.Drawing.Font("Segoe UI", 12.5, [System.Drawing.FontStyle]::Bold)
+        $stBg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 11, 14, 17))
+        $stBorder = New-Object System.Drawing.Pen($stColor, 2)
         $stBrush = New-Object System.Drawing.SolidBrush($stColor)
+        $stFmt = New-Object System.Drawing.StringFormat
+        $stFmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $stFmt.LineAlignment = [System.Drawing.StringAlignment]::Center
         $stSize = $g.MeasureString($opStatus, $stFont)
-        $boxW = $stSize.Width + 14
-        $boxH = $stSize.Height + 6
+        $boxW = [Math]::Max(104, $stSize.Width + 28)
+        $boxH = $stSize.Height + 12
+        $arrowH = 7
+        $arrowHalfW = 7
+        $totalH = $boxH + $arrowH
+        $cornerR = [Math]::Min(8, [Math]::Min($boxW, $boxH) / 3)
+        $diam = $cornerR * 2
+
         $drawX = $anchorPxX - ($boxW / 2)
-        $drawY = $anchorPxY - $boxH
+        $drawY = $anchorPxY - $totalH
         $minLeft = if ($null -ne $sBounds) { [float]([double]$sBounds.x * $form.ClientSize.Width) + 4 } else { 4 }
         $maxRight = if ($null -ne $sBounds) { [float](([double]$sBounds.x + [double]$sBounds.width) * $form.ClientSize.Width) - 4 } else { $form.ClientSize.Width - 4 }
         $minTop = if ($null -ne $sBounds) { [float]([double]$sBounds.y * $form.ClientSize.Height) + 4 } else { 4 }
         $maxBot = if ($null -ne $sBounds) { [float](([double]$sBounds.y + [double]$sBounds.height) * $form.ClientSize.Height) - 4 } else { $form.ClientSize.Height - 4 }
         $drawX = [Math]::Max($minLeft, [Math]::Min([Math]::Max($minLeft, $maxRight - $boxW), $drawX))
-        $drawY = [Math]::Max($minTop, [Math]::Min([Math]::Max($minTop, $maxBot - $boxH), $drawY))
+        $drawY = [Math]::Max($minTop, [Math]::Min([Math]::Max($minTop, $maxBot - $totalH), $drawY))
 
-        $g.FillRectangle($stBg, $drawX, $drawY, $boxW, $boxH)
-        $g.DrawRectangle($stBorder, $drawX, $drawY, $boxW, $boxH)
-        $g.DrawString($opStatus, $stFont, $stBrush, $drawX + 7, $drawY + 3)
+        $tipX = [Math]::Max($drawX + $cornerR + $arrowHalfW, [Math]::Min($drawX + $boxW - $cornerR - $arrowHalfW, $anchorPxX))
+        $boxBot = $drawY + $boxH
+
+        $callout = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $callout.AddArc($drawX, $drawY, $diam, $diam, 180, 90)
+        $callout.AddArc($drawX + $boxW - $diam, $drawY, $diam, $diam, 270, 90)
+        $callout.AddArc($drawX + $boxW - $diam, $boxBot - $diam, $diam, $diam, 0, 90)
+        $callout.AddLine($drawX + $boxW - $cornerR, $boxBot, $tipX + $arrowHalfW, $boxBot)
+        $callout.AddLine($tipX + $arrowHalfW, $boxBot, $tipX, $boxBot + $arrowH)
+        $callout.AddLine($tipX, $boxBot + $arrowH, $tipX - $arrowHalfW, $boxBot)
+        $callout.AddLine($tipX - $arrowHalfW, $boxBot, $drawX + $cornerR, $boxBot)
+        $callout.AddArc($drawX, $boxBot - $diam, $diam, $diam, 90, 90)
+        $callout.CloseFigure()
+
+        $g.FillPath($stBg, $callout)
+        $g.DrawPath($stBorder, $callout)
+        $textRect = New-Object System.Drawing.RectangleF($drawX, $drawY, $boxW, $boxH)
+        $g.DrawString($opStatus, $stFont, $stBrush, $textRect, $stFmt)
+        $callout.Dispose()
+        $stFmt.Dispose()
         $stFont.Dispose()
         $stBg.Dispose()
         $stBorder.Dispose()
@@ -210,41 +236,6 @@ $form.Add_Paint({
         $dotBrush.Dispose()
     }
 
-    if ($hasSignal) {
-        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-
-        $bounds = if ($null -ne $state.signal.chartBounds) { $state.signal.chartBounds } else { $state.chartBounds }
-        if ($null -ne $bounds -and $null -ne $state.signal.chartRelativeX -and $null -ne $state.signal.chartRelativeY) {
-            $normX = $bounds.x + ($state.signal.chartRelativeX * $bounds.width)
-            $normY = $bounds.y + ($state.signal.chartRelativeY * $bounds.height)
-        } else {
-            $normX = $state.signal.candleX
-            $normY = $state.signal.candleY
-        }
-
-        $x = [float]($normX * $form.ClientSize.Width)
-        $y = [float]($normY * $form.ClientSize.Height)
-
-        $font = New-Object System.Drawing.Font("Consolas", 13, [System.Drawing.FontStyle]::Bold)
-        $size = $g.MeasureString($dir, $font)
-        $drawX = $x - ($size.Width / 2)
-        $drawY = $y - ($size.Height / 2)
-
-        $shadowBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 5, 5, 5))
-        $textColor = if ($dir -eq "COMPRA") {
-            [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
-        } else {
-            [System.Drawing.Color]::FromArgb(255, 239, 68, 68)
-        }
-        $textBrush = New-Object System.Drawing.SolidBrush($textColor)
-
-        $g.DrawString($dir, $font, $shadowBrush, $drawX + 1, $drawY + 1)
-        $g.DrawString($dir, $font, $textBrush, $drawX, $drawY)
-
-        $font.Dispose()
-        $shadowBrush.Dispose()
-        $textBrush.Dispose()
-    }
 })
 
 # Track whichever broker EXE or browser chart window the user focuses/clicks at 20Hz

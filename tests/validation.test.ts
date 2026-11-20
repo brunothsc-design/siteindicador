@@ -1653,6 +1653,46 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
     assert.equal(missingChart.reason, 'chart_not_detected');
     assert.equal(computeCandleStatusAnchor(missingChart.candle, null), null);
   });
+
+  it('enforces single dynamic rounded callout with downward arrow across web preview and native Windows overlays without duplicates', () => {
+    const signalOverlaySrc = fs.readFileSync(path.resolve('src/components/SignalOverlay.tsx'), 'utf8');
+    assert.match(signalOverlaySrc, /data-status-callout=\{displayStatus\}/);
+    assert.match(signalOverlaySrc, /rounded-lg/);
+    assert.match(signalOverlaySrc, /#22C55E/);
+    assert.match(signalOverlaySrc, /#EF4444/);
+    assert.match(signalOverlaySrc, /#FBBF24/);
+    assert.match(signalOverlaySrc, /<polygon points="1,0 15,0 8,7"/);
+    assert.doesNotMatch(signalOverlaySrc, /\{validSignal && \(/);
+
+    const csSrc = fs.readFileSync(
+      path.resolve('native/windows-overlay/win-agent/ChartPulseOverlayHost.cs'),
+      'utf8'
+    );
+    assert.match(csSrc, /using System\.Drawing\.Drawing2D;/);
+    assert.match(csSrc, /GraphicsPath callout = new GraphicsPath\(\)/);
+    assert.match(csSrc, /callout\.AddArc\(/);
+    assert.match(csSrc, /callout\.AddLine\(tipX \+ arrowHalfW, boxBot, tipX, boxBot \+ arrowH\)/);
+    assert.match(csSrc, /Color\.FromArgb\(255, 34, 197, 94\)/);
+    assert.match(csSrc, /Color\.FromArgb\(255, 239, 68, 68\)/);
+    assert.match(csSrc, /Color\.FromArgb\(255, 251, 191, 36\)/);
+    assert.doesNotMatch(csSrc, /\bif\s*\(hasSignal\)/);
+    assert.doesNotMatch(csSrc, /MeasureString\(snapshot\.Direction/);
+
+    const ps1Src = fs.readFileSync(path.resolve('native/windows-overlay/ChartPulseOverlay.ps1'), 'utf8');
+    assert.match(ps1Src, /System\.Drawing\.Drawing2D\.GraphicsPath/);
+    assert.match(ps1Src, /\$callout\.AddArc\(/);
+    assert.match(ps1Src, /\$callout\.AddLine\(\$tipX \+ \$arrowHalfW, \$boxBot, \$tipX, \$boxBot \+ \$arrowH\)/);
+    assert.doesNotMatch(ps1Src, /^\s*if\s*\(\$hasSignal\)/m);
+    assert.doesNotMatch(ps1Src, /MeasureString\(\$dir/);
+
+    const electronSrc = fs.readFileSync(path.resolve('native/windows-overlay/electron-main.cjs'), 'utf8');
+    assert.match(electronSrc, /id="opStatus"/);
+    assert.match(electronSrc, /id="opBox"/);
+    assert.match(electronSrc, /id="opArrow"/);
+    assert.match(electronSrc, /border-radius:\s*8px/);
+    assert.doesNotMatch(electronSrc, /id="sig"/);
+  });
 });
+
 
 
