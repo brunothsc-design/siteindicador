@@ -1577,7 +1577,7 @@ describe('ChartPulse AI — Permanent M1 Operational Status Indicator (AGUARDAND
       'utf8'
     );
     assert.match(cs, /\\"version\\":\\"1\.3\.2\\"/);
-    assert.match(cs, /\\"buildId\\":\\"2026-11-20-ulw\\"/);
+    assert.match(cs, /\\"buildId\\":\\"2026-11-20-hwnd\\"/);
     assert.match(cs, /UpdateLayeredWindow/);
     assert.match(cs, /DWMWA_CLOAKED/);
     assert.match(cs, /OverlayApplicationContext/);
@@ -1988,6 +1988,21 @@ describe('ChartPulse AI — 8-Stage Real-Time Broker Overlay Pipeline & Non-Econ
     assert.doesNotMatch(cs, /TransparencyKey\s*=/);
     assert.match(cs, /PixelFormat\.Format32bppPArgb/);
     assert.match(cs, /Win32Native\.UpdateLayeredWindow/);
+    assert.match(cs, /Win32Native\.SetWindowPos/);
+    assert.match(cs, /HWND_TOPMOST/);
+    assert.match(cs, /SWP_NOACTIVATE/);
+    assert.match(cs, /DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2/);
+    assert.match(cs, /BrokerWindowSelectorForm/);
+    assert.match(cs, /NotifyIcon/);
+    assert.match(cs, /SetManualBrokerWindow/);
+    assert.match(cs, /EnumerateCandidateWindows/);
+    assert.match(cs, /ConvertCaptureNormToOverlayPx/);
+    assert.match(cs, /TARGET_MINIMIZED/);
+    assert.match(cs, /TARGET_WINDOW hwnd=/);
+    assert.match(cs, /DRAW status=/);
+    assert.match(cs, /ULW_FAIL/);
+    assert.match(cs, /WM_NCHITTEST/);
+    assert.match(cs, /WM_MOUSEACTIVATE/);
     assert.match(cs, /DWMWA_CLOAKED/);
     assert.match(cs, /exePath/);
     assert.match(cs, /lastRenderError/);
