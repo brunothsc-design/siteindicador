@@ -88,21 +88,56 @@ function classifyPixel(
   return null;
 }
 
-/**
- * Independent forming-candle tracker:
- * Detects the rightmost candle currently forming inside the verified chart region,
- * tracks its horizontal coordinate (X) and real-time price level (Y), and returns
- * null whenever detection or price positioning is not reliable (never invents values).
- */
-export function detectLiveMovingCandle(
+export type CandleDetectionFailureReason =
+  | 'chart_not_detected'
+  | 'invalid_chart_bounds'
+  | 'no_candle_columns_detected'
+  | 'all_clusters_filtered'
+  | 'ambiguous_candle_or_filtered'
+  | 'unresolved_candle_close';
+
+export interface CandleDetectionDiagnostics {
+  plotW: number;
+  plotH: number;
+  bg: { r: number; g: number; b: number };
+  validColsCount: number;
+  tinyColoredColsCount: number;
+  rawClustersCount: number;
+  megaClustersSplitCount: number;
+  filteredClustersCount: number;
+  rejectedTooWideOrTiny: number;
+  rejectedHorizontalStreak: number;
+  rejectedCountdownText: number;
+  rejectedExpirationLine: number;
+  rejectedAxisPill: number;
+  rightmostStats: {
+    pxStart: number;
+    pxEnd: number;
+    bull: number;
+    bear: number;
+    mono: number;
+  } | null;
+}
+
+interface InternalCandleDetectionResult {
+  candle: LiveCandleTracker | null;
+  reason: CandleDetectionFailureReason | null;
+  diagnostics: CandleDetectionDiagnostics | null;
+}
+
+function detectLiveMovingCandleCore(
   rgba: Uint8ClampedArray,
   width: number,
   height: number,
   chartBounds: ChartBounds | null,
-  verifiedPriceLine: PriceLine | null
-): LiveCandleTracker | null {
+  verifiedPriceLine: PriceLine | null,
+  chartDetected = true
+): InternalCandleDetectionResult {
+  if (!chartDetected) {
+    return { candle: null, reason: 'chart_not_detected', diagnostics: null };
+  }
   if (!chartBounds || width < 40 || height < 30) {
-    return null;
+    return { candle: null, reason: 'invalid_chart_bounds', diagnostics: null };
   }
 
   const bx0 = Math.max(0, Math.floor(chartBounds.x * width));
@@ -113,7 +148,7 @@ export function detectLiveMovingCandle(
   const plotW = bx1 - bx0 + 1;
   const plotH = by1 - by0 + 1;
   if (plotW < 40 || plotH < 30) {
-    return null;
+    return { candle: null, reason: 'invalid_chart_bounds', diagnostics: null };
   }
 
   const bg = estimateChartBackground(rgba, width, height, chartBounds);
@@ -126,6 +161,7 @@ export function detectLiveMovingCandle(
     bull: number;
     bear: number;
     mono: number;
+    bestRun: number;
     activeRows: number[];
   }
 
@@ -203,7 +239,7 @@ export function detectLiveMovingCandle(
     }
 
     if (bestRun >= 3 && activeRows.length >= 3) {
-      validCols.push({ px, minPy, maxPy, bull, bear, mono, activeRows });
+      validCols.push({ px, minPy, maxPy, bull, bear, mono, bestRun, activeRows });
     } else if (tinyRun === 2 && tinyRows.length >= 2) {
       tinyColoredCols.push({
         px,
@@ -212,21 +248,46 @@ export function detectLiveMovingCandle(
         bull: tinyBull,
         bear: tinyBear,
         mono: 0,
+        bestRun: 2,
         activeRows: tinyRows,
       });
     }
   }
 
   if (tinyColoredCols.length > 0) {
+    let lastColoredValidPx = -1;
+    for (let i = validCols.length - 1; i >= 0; i--) {
+      if (validCols[i].bull + validCols[i].bear >= 2) {
+        lastColoredValidPx = validCols[i].px;
+        break;
+      }
+    }
     let tCluster: ColStats[] = [tinyColoredCols[0]];
     const flushTiny = () => {
       const span = tCluster[tCluster.length - 1].px - tCluster[0].px + 1;
-      if (tCluster.length >= 1 && span <= 16) {
-        const lastValidPx = validCols.length > 0 ? validCols[validCols.length - 1].px : -1;
-        if (tCluster[0].px > lastValidPx) {
-          validCols.push(...tCluster);
+      if (tCluster.length < 1 || span > 16 || tCluster[0].px <= lastColoredValidPx) {
+        return;
+      }
+      // Reject segments belonging to a dashed horizontal price line (repeating 2px-tall dashes at identical Y across > 18px)
+      const refMinPy = tCluster[0].minPy;
+      const refMaxPy = tCluster[0].maxPy;
+      const refPx = tCluster[0].px;
+      let bandMinPx = refPx;
+      let bandMaxPx = tCluster[tCluster.length - 1].px;
+      for (const col of tinyColoredCols) {
+        if (
+          Math.abs(col.px - refPx) <= 120 &&
+          Math.abs(col.minPy - refMinPy) <= 1 &&
+          Math.abs(col.maxPy - refMaxPy) <= 1
+        ) {
+          if (col.px < bandMinPx) bandMinPx = col.px;
+          if (col.px > bandMaxPx) bandMaxPx = col.px;
         }
       }
+      if (bandMaxPx - bandMinPx + 1 > 18) {
+        return;
+      }
+      validCols.push(...tCluster);
     };
     for (let i = 1; i < tinyColoredCols.length; i++) {
       if (
@@ -243,26 +304,75 @@ export function detectLiveMovingCandle(
     validCols.sort((a, b) => a.px - b.px);
   }
 
+  const baseDiag: CandleDetectionDiagnostics = {
+    plotW,
+    plotH,
+    bg,
+    validColsCount: validCols.length,
+    tinyColoredColsCount: tinyColoredCols.length,
+    rawClustersCount: 0,
+    megaClustersSplitCount: 0,
+    filteredClustersCount: 0,
+    rejectedTooWideOrTiny: 0,
+    rejectedHorizontalStreak: 0,
+    rejectedCountdownText: 0,
+    rejectedExpirationLine: 0,
+    rejectedAxisPill: 0,
+    rightmostStats: null,
+  };
+
   if (validCols.length === 0) {
-    return null;
+    return { candle: null, reason: 'no_candle_columns_detected', diagnostics: baseDiag };
   }
 
-  const clusters: ColStats[][] = [];
+  const rawClusters: ColStats[][] = [];
   let current: ColStats[] = [validCols[0]];
   for (let i = 1; i < validCols.length; i++) {
     if (validCols[i].px - validCols[i - 1].px <= 3) {
       current.push(validCols[i]);
     } else {
-      clusters.push(current);
+      rawClusters.push(current);
       current = [validCols[i]];
     }
   }
-  clusters.push(current);
+  rawClusters.push(current);
+
+  // Split any mega-cluster caused by a 3px horizontal indicator/MA/price line bridging adjacent candles
+  const clusters: ColStats[][] = [];
+  for (const rc of rawClusters) {
+    const spanPx = rc[rc.length - 1].px - rc[0].px + 1;
+    if (spanPx <= maxCandleSpan) {
+      clusters.push(rc);
+    } else {
+      baseDiag.megaClustersSplitCount++;
+      const strongCols = rc.filter(
+        (col) => col.bestRun >= 5 || (col.maxPy - col.minPy + 1 >= 6 && col.activeRows.length >= 5)
+      );
+      if (strongCols.length > 0) {
+        let sub: ColStats[] = [strongCols[0]];
+        for (let i = 1; i < strongCols.length; i++) {
+          if (strongCols[i].px - strongCols[i - 1].px <= 3) {
+            sub.push(strongCols[i]);
+          } else {
+            clusters.push(sub);
+            sub = [strongCols[i]];
+          }
+        }
+        clusters.push(sub);
+      } else {
+        clusters.push(rc);
+      }
+    }
+  }
+  baseDiag.rawClustersCount = clusters.length;
 
   const candleClusters = clusters.filter((c) => {
     const spanPx = c[c.length - 1].px - c[0].px + 1;
     const totalPixels = c.reduce((acc, col) => acc + col.activeRows.length, 0);
-    if (spanPx > maxCandleSpan || totalPixels < 2) return false;
+    if (spanPx > maxCandleSpan || totalPixels < 2) {
+      baseDiag.rejectedTooWideOrTiny++;
+      return false;
+    }
 
     let minTop = height;
     let maxTop = -1;
@@ -288,12 +398,11 @@ export function detectLiveMovingCandle(
     const avgHeight = heightSum / c.length;
     const clusterVertSpan = maxBot - minTop + 1;
 
-    // Exclude thin horizontal line streaks
     if (spanPx >= 18 && avgHeight <= 2.2) {
+      baseDiag.rejectedHorizontalStreak++;
       return false;
     }
 
-    // Exclude monochrome horizontal countdown/timer/text labels (e.g., "00:42") to the right of candles
     if (
       clusterBull === 0 &&
       clusterBear === 0 &&
@@ -302,10 +411,10 @@ export function detectLiveMovingCandle(
       avgHeight <= 15 &&
       c.length >= 4
     ) {
+      baseDiag.rejectedCountdownText++;
       return false;
     }
 
-    // Exclude thin 1-3px vertical divider/expiration/deadline lines while preserving tall thin M1 candles with wicks
     const totalFillDensity = totalPixels / Math.max(1, spanPx * clusterVertSpan);
     const minExpSpan = clusterBull + clusterBear > 0 ? plotH * 0.50 : plotH * 0.35;
     if (
@@ -313,21 +422,23 @@ export function detectLiveMovingCandle(
       (clusterVertSpan >= plotH * 0.55 ||
         (clusterVertSpan >= minExpSpan && totalFillDensity <= 0.58))
     ) {
+      baseDiag.rejectedExpirationLine++;
       return false;
     }
 
-    // Exclude horizontal or boundary-clipped right-axis price pills while keeping genuine interior wickless M1 candles and newly opened 2-4px candles
+    // Exclude right-axis price pills (wide flat labels or right-boundary clipped) while keeping flat interior M1 candles
     const touchesRightBoundary = c[c.length - 1].px >= bx1 - 6;
     if (
       spanPx >= 8 &&
       c.length >= 4 &&
       avgHeight >= 5 &&
       avgHeight <= 24 &&
-      (spanPx >= avgHeight * 1.1 || touchesRightBoundary)
+      (touchesRightBoundary || spanPx >= avgHeight * 2.1)
     ) {
       const flatTopBottom = maxTop - minTop <= 1 && maxBot - minBot <= 1;
       const solidFill = fillSum / c.length >= 0.88;
       if (flatTopBottom && solidFill) {
+        baseDiag.rejectedAxisPill++;
         return false;
       }
     }
@@ -335,8 +446,9 @@ export function detectLiveMovingCandle(
     return true;
   });
 
+  baseDiag.filteredClustersCount = candleClusters.length;
   if (candleClusters.length === 0) {
-    return null;
+    return { candle: null, reason: 'all_clusters_filtered', diagnostics: baseDiag };
   }
 
   // Prefer the rightmost colored forming candle over trailing monochrome countdown/icon/crosshair artifacts,
@@ -373,6 +485,7 @@ export function detectLiveMovingCandle(
       }
     }
   }
+
   let topPy = height;
   let bottomPy = -1;
   let bullTotal = 0;
@@ -390,6 +503,14 @@ export function detectLiveMovingCandle(
       rowCounts.set(r, (rowCounts.get(r) ?? 0) + 1);
     }
   }
+
+  baseDiag.rightmostStats = {
+    pxStart: rightmost[0].px,
+    pxEnd: rightmost[rightmost.length - 1].px,
+    bull: bullTotal,
+    bear: bearTotal,
+    mono: monoTotal,
+  };
 
   const bodyThreshold = rightmost.length >= 3 ? Math.max(2, Math.ceil(rightmost.length * 0.5)) : 1;
   let bodyTop = height;
@@ -448,7 +569,7 @@ export function detectLiveMovingCandle(
   }
 
   if (resolvedNormY === null) {
-    return null;
+    return { candle: null, reason: 'unresolved_candle_close', diagnostics: baseDiag };
   }
 
   const centerPx = (rightmost[0].px + rightmost[rightmost.length - 1].px) / 2;
@@ -463,24 +584,39 @@ export function detectLiveMovingCandle(
   );
 
   return {
-    x: Number(normX.toFixed(4)),
-    y: Number(resolvedNormY.toFixed(4)),
-    chartRelativeX: Number(relX.toFixed(4)),
-    chartRelativeY: Number(relY.toFixed(4)),
-    topY: Number(Math.max(0.01, Math.min(0.99, topPy / height)).toFixed(4)),
-    bottomY: Number(Math.max(0.01, Math.min(0.99, bottomPy / height)).toFixed(4)),
-    direction,
-    chartBounds,
-    confidence: Number(Math.min(0.98, confidence).toFixed(2)),
-    updatedAt: Date.now(),
+    candle: {
+      x: Number(normX.toFixed(4)),
+      y: Number(resolvedNormY.toFixed(4)),
+      chartRelativeX: Number(relX.toFixed(4)),
+      chartRelativeY: Number(relY.toFixed(4)),
+      topY: Number(Math.max(0.01, Math.min(0.99, topPy / height)).toFixed(4)),
+      bottomY: Number(Math.max(0.01, Math.min(0.99, bottomPy / height)).toFixed(4)),
+      direction,
+      chartBounds,
+      confidence: Number(Math.min(0.98, confidence).toFixed(2)),
+      updatedAt: Date.now(),
+    },
+    reason: null,
+    diagnostics: baseDiag,
   };
 }
 
-export type CandleDetectionFailureReason =
-  | 'chart_not_detected'
-  | 'invalid_chart_bounds'
-  | 'no_candle_columns_detected'
-  | 'ambiguous_candle_or_filtered';
+/**
+ * Independent forming-candle tracker:
+ * Detects the rightmost candle currently forming inside the verified chart region,
+ * tracks its horizontal coordinate (X) and real-time price level (Y), and returns
+ * null whenever detection or price positioning is not reliable (never invents values).
+ */
+export function detectLiveMovingCandle(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  chartBounds: ChartBounds | null,
+  verifiedPriceLine: PriceLine | null
+): LiveCandleTracker | null {
+  return detectLiveMovingCandleCore(rgba, width, height, chartBounds, verifiedPriceLine, true)
+    .candle;
+}
 
 export function detectLiveMovingCandleWithReason(
   rgba: Uint8ClampedArray,
@@ -489,16 +625,17 @@ export function detectLiveMovingCandleWithReason(
   chartBounds: ChartBounds | null,
   verifiedPriceLine: PriceLine | null,
   chartDetected = true
-): { candle: LiveCandleTracker | null; reason: CandleDetectionFailureReason | null } {
-  if (!chartDetected) {
-    return { candle: null, reason: 'chart_not_detected' };
-  }
-  if (!chartBounds || width < 40 || height < 30) {
-    return { candle: null, reason: 'invalid_chart_bounds' };
-  }
-  const candle = detectLiveMovingCandle(rgba, width, height, chartBounds, verifiedPriceLine);
-  if (candle) {
-    return { candle, reason: null };
-  }
-  return { candle: null, reason: 'ambiguous_candle_or_filtered' };
+): {
+  candle: LiveCandleTracker | null;
+  reason: CandleDetectionFailureReason | null;
+  diagnostics: CandleDetectionDiagnostics | null;
+} {
+  return detectLiveMovingCandleCore(
+    rgba,
+    width,
+    height,
+    chartBounds,
+    verifiedPriceLine,
+    chartDetected
+  );
 }

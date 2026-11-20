@@ -9,6 +9,7 @@ import { processFrameLocally } from './engine/localScreenProcessor.ts';
 import {
   checkLocalOverlayHealth,
   clearLocalOverlaySignals,
+  getLastBridgeDiagnosticSnapshot,
   notifyLocalOverlaySession,
   pushLocalOverlayCandle,
   pushLocalOverlayPrice,
@@ -136,6 +137,8 @@ export default function App() {
     updatedAt: number;
   } | null>(null);
   const lastDiagStateRef = useRef<string>('');
+  const lastDiagLoggedAtRef = useRef(0);
+  const lastVideoNotReadyLogAtRef = useRef(0);
   const localAgentReadyRef = useRef(false);
   const displaySurfaceRef = useRef<string>('window');
 
@@ -187,6 +190,8 @@ export default function App() {
     geminiChartBoundsRef.current = null;
     geminiVisionCandleRef.current = null;
     lastDiagStateRef.current = '';
+    lastDiagLoggedAtRef.current = 0;
+    lastVideoNotReadyLogAtRef.current = 0;
     localAgentReadyRef.current = false;
     displaySurfaceRef.current = 'window';
     cooldownUntilRef.current = 0;
@@ -312,8 +317,21 @@ export default function App() {
   const trackCurrentPrice = useCallback(() => {
     if (!isActiveRef.current || !sessionIdRef.current) return;
 
+    const now = Date.now();
     const video = videoRef.current;
+    if (video && video.paused && video.srcObject) {
+      void video.play().catch(() => {});
+    }
     if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      if (now - lastVideoNotReadyLogAtRef.current >= 2500) {
+        lastVideoNotReadyLogAtRef.current = now;
+        console.warn('[ChartPulse:Diag] Captura aguardando frame de vídeo válido', {
+          hasVideoEl: Boolean(video),
+          readyState: video?.readyState ?? -1,
+          videoWidth: video?.videoWidth ?? 0,
+          videoHeight: video?.videoHeight ?? 0,
+        });
+      }
       return;
     }
 
@@ -332,6 +350,8 @@ export default function App() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
+    // Keep nearest-neighbor crispness during downscale so thin 1-2px M1 candles do not blur into background
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(video, 0, 0, targetW, targetH);
     const imgData = ctx.getImageData(0, 0, targetW, targetH);
 
@@ -342,7 +362,6 @@ export default function App() {
       lastSignatureRef.current
     );
 
-    const now = Date.now();
     const recentGeminiCandle =
       geminiVisionCandleRef.current && now - geminiVisionCandleRef.current.updatedAt <= 6000
         ? geminiVisionCandleRef.current
@@ -404,8 +423,9 @@ export default function App() {
     const candleFailureReason: CandleDetectionFailureReason | null = nextCandle
       ? null
       : candleDetect.reason;
+    const candleBecameAvailable = lastLiveCandleRef.current === null && nextCandle !== null;
     const candleChanged = liveCandleChanged(lastLiveCandleRef.current, nextCandle);
-    const candleHeartbeatDue = nextCandle !== null && now - lastLiveCandlePushAtRef.current >= 1500;
+    const candleHeartbeatDue = nextCandle !== null && now - lastLiveCandlePushAtRef.current >= 1000;
 
     if (candleChanged || candleHeartbeatDue) {
       lastLiveCandleRef.current = nextCandle;
@@ -434,25 +454,34 @@ export default function App() {
     // Keep permanent operational status anchored directly above the detected forming candle without flicker
     syncOperationalStatusState(
       effectiveBounds ?? lastChartBoundsRef.current,
-      false,
+      candleBecameAvailable,
       nextCandle,
       effectiveChartDetected
     );
 
-    const diagKey = `${effectiveChartDetected}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}|${candleFailureReason ?? 'ok'}`;
-    if (diagKey !== lastDiagStateRef.current) {
+    const diagKey = `${effectiveChartDetected}|${local.diagnostics.failureReason ?? 'ok'}|${Boolean(nextPrice)}|${nextPrice?.source ?? 'none'}|${Boolean(nextCandle)}|${nextCandle?.direction ?? 'none'}|${lastOperationalStatusRef.current?.status ?? 'none'}|${Boolean(lastOperationalStatusRef.current?.anchor)}|${candleFailureReason ?? 'ok'}`;
+    const periodicMissingDiagDue =
+      !nextCandle && now - lastDiagLoggedAtRef.current >= 3000;
+    if (diagKey !== lastDiagStateRef.current || periodicMissingDiagDue) {
       lastDiagStateRef.current = diagKey;
-      if (!lastOperationalStatusRef.current?.anchor && candleFailureReason) {
-        console.warn('[ChartPulse:Diag] AGUARDANDO oculto — vela M1 não identificada', {
+      lastDiagLoggedAtRef.current = now;
+      if (!nextCandle || (!lastOperationalStatusRef.current?.anchor && candleFailureReason)) {
+        console.warn('[ChartPulse:Diag] Vela M1 / Âncora retornou null', {
           reason: candleFailureReason,
+          chartFailureReason: local.diagnostics.failureReason,
+          localDiagnostics: local.diagnostics,
+          candleDiagnostics: candleDetect.diagnostics,
           chartDetected: effectiveChartDetected,
           chartBounds: effectiveBounds,
+          bridge: getLastBridgeDiagnosticSnapshot(),
         });
       }
       console.info('[ChartPulse:Diag]', {
         frame: `${targetW}x${targetH}`,
         chartDetected: effectiveChartDetected,
         chartBounds: effectiveBounds,
+        localDiagnostics: local.diagnostics,
+        candleDiagnostics: candleDetect.diagnostics,
         operationalStatus: lastOperationalStatusRef.current?.status ?? null,
         statusAnchor: lastOperationalStatusRef.current?.anchor ?? null,
         candleFailureReason,
@@ -460,8 +489,9 @@ export default function App() {
           ? { y: nextPrice.y, source: nextPrice.source, conf: nextPrice.confidence }
           : null,
         liveCandle: nextCandle
-          ? { x: nextCandle.x, y: nextCandle.y, dir: nextCandle.direction, conf: nextCandle.confidence }
+          ? { x: nextCandle.x, y: nextCandle.y, topY: nextCandle.topY, dir: nextCandle.direction, conf: nextCandle.confidence }
           : null,
+        bridge: getLastBridgeDiagnosticSnapshot(),
         localAgentConnected: localAgentReadyRef.current,
       });
     }
@@ -849,7 +879,9 @@ export default function App() {
         if (
           isActiveRef.current &&
           activeSid &&
-          (!health.active || health.operationalStatus === 'NONE')
+          (!health.active ||
+            health.operationalStatus === 'NONE' ||
+            (lastLiveCandleRef.current !== null && (health.liveCandleUpdates ?? 0) === 0))
         ) {
           void notifyLocalOverlaySession(activeSid, displaySurfaceRef.current).then((synced) => {
             if (!synced || !isActiveRef.current || sessionIdRef.current !== activeSid) return;

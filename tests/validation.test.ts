@@ -32,8 +32,11 @@ import {
 } from '../src/config/signalConfig.ts';
 import {
   buildOperationalStatusPayloadWithLiveCandle,
+  checkLocalOverlayHealth,
   clearLocalOverlaySignals,
+  getLastBridgeDiagnosticSnapshot,
   isTrustedOverlayOrigin,
+  notifyLocalOverlaySession,
   pushLocalOverlayCandle,
   pushLocalOverlayStatus,
 } from '../src/engine/localOverlayBridge.ts';
@@ -2322,6 +2325,182 @@ describe('ChartPulse AI — 8-Stage Real-Time Broker Overlay Pipeline & Non-Econ
     assert.match(cs, /long paintSeq = Interlocked\.Increment\(ref _paintCount\);/);
     assert.match(cs, /UpdateOperationalStatus/);
     assert.match(cs, /nowMs - _state\.LiveCandleUpdatedAtMs <= 2500/);
+  });
+
+  it('detects zoomed-in 42px candles, 22x14 flat candles, and 3px horizontal crossing lines, exposes null diagnostics, and verifies liveCandleUpdates > 0 and hasStatusAnchor = true on agent /health', async () => {
+    const width = 1280;
+    const height = 720;
+    const makeFrame = (bg: [number, number, number]) => {
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        rgba[i * 4] = bg[0];
+        rgba[i * 4 + 1] = bg[1];
+        rgba[i * 4 + 2] = bg[2];
+        rgba[i * 4 + 3] = 255;
+      }
+      const paint = (x0: number, y0: number, x1: number, y1: number, c: [number, number, number]) => {
+        for (let y = Math.max(0, Math.round(y0)); y <= Math.min(height - 1, Math.round(y1)); y++) {
+          for (let x = Math.max(0, Math.round(x0)); x <= Math.min(width - 1, Math.round(x1)); x++) {
+            const idx = (y * width + x) * 4;
+            rgba[idx] = c[0];
+            rgba[idx + 1] = c[1];
+            rgba[idx + 2] = c[2];
+          }
+        }
+      };
+      return { rgba, paint };
+    };
+
+    // Case A: Zoomed-in 42px wickless M1 candles
+    const zoom = makeFrame([24, 28, 40]);
+    for (let i = 0; i < 8; i++) {
+      const x0 = 120 + i * 74;
+      zoom.paint(x0, 260, x0 + 42, 340, i % 2 === 0 ? [14, 203, 129] : [246, 70, 93]);
+    }
+    const dZoom = processFrameLocally(zoom.rgba, width, height, null);
+    assert.equal(dZoom.chartDetected, true);
+    const cZoom = detectLiveMovingCandleWithReason(zoom.rgba, width, height, dZoom.chartBounds, dZoom.priceLine, dZoom.chartDetected);
+    assert.equal(cZoom.reason, null);
+    assert.ok(cZoom.candle !== null);
+    assert.ok(Math.abs(cZoom.candle.x * width - 659) <= 4);
+
+    // Case B: Flat 22x14 interior forming M1 candle must not be discarded as a price pill
+    const flat = makeFrame([19, 23, 34]);
+    for (let i = 0; i < 16; i++) {
+      const x0 = 120 + i * 44;
+      const c: [number, number, number] = i % 2 === 0 ? [34, 197, 94] : [239, 68, 68];
+      flat.paint(x0 + 10, 240, x0 + 11, 380, c);
+      flat.paint(x0, 270, x0 + 21, 340, c);
+    }
+    flat.paint(120 + 16 * 44, 280, 120 + 16 * 44 + 21, 293, [34, 197, 94]);
+    const dFlat = processFrameLocally(flat.rgba, width, height, null);
+    assert.equal(dFlat.chartDetected, true);
+    const cFlat = detectLiveMovingCandleWithReason(flat.rgba, width, height, dFlat.chartBounds, dFlat.priceLine, dFlat.chartDetected);
+    assert.ok(cFlat.candle !== null);
+    assert.ok(Math.abs(cFlat.candle.x * width - 834.5) <= 4, `Expected rightmost 22x14 candle at 834.5, got ${cFlat.candle.x * width}`);
+
+    // Case C: 3px horizontal EMA/price line crossing through all candles splits cleanly
+    const cross = makeFrame([24, 28, 40]);
+    for (let i = 0; i < 30; i++) {
+      const x0 = 140 + i * 24;
+      const c: [number, number, number] = i % 2 === 0 ? [34, 197, 94] : [239, 68, 68];
+      cross.paint(x0 + 3, 240 + (i % 4) * 10, x0 + 4, 370 + (i % 3) * 10, c);
+      cross.paint(x0, 270 + (i % 4) * 10, x0 + 7, 340 + (i % 3) * 10, c);
+    }
+    cross.paint(140, 310, 960, 312, [56, 189, 248]);
+    const dCross = processFrameLocally(cross.rgba, width, height, null);
+    assert.equal(dCross.chartDetected, true);
+    const cCross = detectLiveMovingCandleWithReason(cross.rgba, width, height, dCross.chartBounds, dCross.priceLine, dCross.chartDetected);
+    assert.equal(cCross.reason, null);
+    assert.ok(cCross.candle !== null);
+    assert.ok((cCross.diagnostics?.megaClustersSplitCount ?? 0) >= 1);
+    assert.ok(Math.abs(cCross.candle.x * width - 839.5) <= 4);
+
+    // Case D: Blank frame exposes exact null-detection diagnostics
+    const blank = makeFrame([19, 23, 34]);
+    const dBlank = processFrameLocally(blank.rgba, width, height, null);
+    assert.equal(dBlank.chartDetected, false);
+    assert.equal(dBlank.diagnostics.failureReason, 'insufficient_candle_samples');
+    const cBlank = detectLiveMovingCandleWithReason(blank.rgba, width, height, dBlank.chartBounds, dBlank.priceLine, dBlank.chartDetected);
+    assert.equal(cBlank.candle, null);
+    assert.equal(cBlank.reason, 'chart_not_detected');
+
+    // Case E: Simulate exact Windows Agent endpoint state and verify liveCandleUpdates > 0 and hasStatusAnchor === true
+    const originalFetch = globalThis.fetch;
+    const agentState = {
+      active: false,
+      sessionId: '',
+      operationalStatus: 'AGUARDANDO',
+      hasStatusAnchor: false,
+      hasLiveCandle: false,
+      liveCandleUpdates: 0,
+      statusUpdates: 0,
+      lastCandleX: 0,
+      lastCandleY: 0,
+      lastStatusAnchorX: 0,
+      lastStatusAnchorY: 0,
+    };
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      if (url.endsWith('/overlay/session')) {
+        agentState.active = true;
+        agentState.sessionId = String(body.sessionId ?? '');
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith('/overlay/candle')) {
+        const lc = body.liveCandle as { x?: number; y?: number } | null;
+        if (lc && typeof lc.x === 'number' && typeof lc.y === 'number') {
+          agentState.hasLiveCandle = true;
+          agentState.lastCandleX = lc.x;
+          agentState.lastCandleY = lc.y;
+          agentState.liveCandleUpdates++;
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith('/overlay/status')) {
+        const op = body.operationalStatus as OperationalStatusState | null;
+        if (op) {
+          agentState.operationalStatus = op.status;
+          agentState.statusUpdates++;
+          if (op.anchor) {
+            agentState.hasStatusAnchor = true;
+            agentState.lastStatusAnchorX = op.anchor.x;
+            agentState.lastStatusAnchorY = op.anchor.y;
+          }
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith('/health')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            component: 'ChartPulseOverlay',
+            version: '1.3.2',
+            operationalStatusSupported: true,
+            liveCandleSupported: true,
+            ...agentState,
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await clearLocalOverlaySignals('e2e-m1-sess');
+      assert.equal(await notifyLocalOverlaySession('e2e-m1-sess', 'window'), true);
+
+      const opStatus = resolveOperationalStatus({
+        isActive: true,
+        current: createInitialOperationalStatus(dCross.chartBounds, null, 1700000000000),
+        activeSignal: null,
+        liveCandle: cCross.candle,
+        latestBounds: dCross.chartBounds,
+        chartDetected: dCross.chartDetected,
+        now: 1700000000250,
+      });
+      assert.ok(opStatus !== null && opStatus.anchor !== null);
+
+      assert.equal(await pushLocalOverlayCandle('e2e-m1-sess', cCross.candle), true);
+      assert.equal(await pushLocalOverlayStatus('e2e-m1-sess', opStatus), true);
+
+      const health = await checkLocalOverlayHealth();
+      assert.ok(health !== null);
+      assert.ok((health.liveCandleUpdates ?? 0) > 0, 'liveCandleUpdates must be > 0');
+      assert.equal(health.hasLiveCandle, true);
+      assert.equal(health.hasStatusAnchor, true, 'hasStatusAnchor must be true');
+      assert.equal(health.operationalStatus, 'AGUARDANDO');
+
+      const diag = getLastBridgeDiagnosticSnapshot();
+      assert.ok(diag.candleSentCount > 0);
+      assert.ok(diag.statusWithAnchorCount > 0);
+      assert.equal(diag.lastError, null);
+    } finally {
+      await clearLocalOverlaySignals('e2e-m1-sess');
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

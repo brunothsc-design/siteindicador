@@ -2,6 +2,24 @@ import type { ChartBounds, PriceLine } from '../types/signals.ts';
 
 export type ChartTheme = 'DARK' | 'LIGHT';
 
+export interface LocalFrameDiagnostics {
+  width: number;
+  height: number;
+  bg: { r: number; g: number; b: number; luma: number };
+  totalCandleSamples: number;
+  activeColumns: number;
+  activeRows: number;
+  spanX: number;
+  spanY: number;
+  rejectedWideRuns: number;
+  failureReason:
+    | null
+    | 'insufficient_candle_samples'
+    | 'insufficient_active_columns'
+    | 'insufficient_horizontal_span'
+    | 'insufficient_vertical_span';
+}
+
 export interface LocalFrameDigest {
   chartDetected: boolean;
   chartBounds: ChartBounds | null;
@@ -10,6 +28,7 @@ export interface LocalFrameDigest {
   candleDensityScore: number;
   diffScore: number;
   signature: Float32Array;
+  diagnostics: LocalFrameDiagnostics;
 }
 
 const GRID_W = 240;
@@ -121,9 +140,13 @@ export function processFrameLocally(
       }
 
       if (gy >= 3 && gy <= GRID_H - 4 && gx >= 2 && gx <= GRID_W - 3) {
-        const halfTapOffset = Math.max(1, Math.floor(width / (GRID_W * 2)));
-        const px2 = Math.min(width - 1, px + halfTapOffset);
+        const cellStepPx = Math.max(2, Math.floor(width / GRID_W));
+        const tapOffset1 = Math.max(1, Math.floor(cellStepPx / 3));
+        const tapOffset2 = Math.max(2, Math.floor((cellStepPx * 2) / 3));
+        const px2 = Math.min(width - 1, px + tapOffset1);
+        const px3 = Math.min(width - 1, px + tapOffset2);
         const idx2 = (py * width + px2) * 4;
+        const idx3 = (py * width + px3) * 4;
 
         const classifyGridTap = (tr: number, tg: number, tb: number): { chroma: boolean; contrast: boolean } => {
           const bgDiff = colorDist(tr, tg, tb, bg.r, bg.g, bg.b);
@@ -131,8 +154,8 @@ export function processFrameLocally(
           const minC = Math.min(tr, tg, tb);
           const saturation = maxC - minC;
           const chroma =
-            bgDiff >= 32 &&
-            saturation >= 20 &&
+            bgDiff >= 30 &&
+            saturation >= 18 &&
             ((tg >= tr + 10 && tg >= tb - 16) || // green / teal / lime
               (tr >= tg + 12 && tr >= tb - 4) || // red / coral / rose / orange
               (tb >= tr + 18 && tg >= tr + 8)); // cyan / blue candles
@@ -141,11 +164,15 @@ export function processFrameLocally(
 
         const tap1 = classifyGridTap(r, g, b);
         const tap2 = tap1.chroma ? tap1 : classifyGridTap(rgba[idx2], rgba[idx2 + 1], rgba[idx2 + 2]);
+        const tap3 =
+          tap1.chroma || tap2.chroma
+            ? tap2
+            : classifyGridTap(rgba[idx3], rgba[idx3 + 1], rgba[idx3 + 2]);
 
-        if (tap1.chroma || tap2.chroma) {
+        if (tap1.chroma || tap2.chroma || tap3.chroma) {
           chromaCandleMask[sigIdx] = 1;
         }
-        if (tap1.contrast || tap2.contrast) {
+        if (tap1.contrast || tap2.contrast || tap3.contrast) {
           contrastMask[sigIdx] = 1;
         }
       }
@@ -154,11 +181,11 @@ export function processFrameLocally(
 
   const diffScore = previousSignature ? diffAccumulator / (GRID_W * GRID_H) : 1;
 
-  // Filter out wide solid UI buttons (e.g., Buy/Sell buttons on right/bottom panels)
-  // A candlestick column has vertical continuity and limited horizontal solid span (<= 12 grid cells)
+  // Filter out wide solid UI buttons and horizontal right-axis price pills while keeping zoomed-in vertical M1 candles
   const candleHitsX = new Float32Array(GRID_W);
   const candleHitsY = new Float32Array(GRID_H);
   let totalCandleSamples = 0;
+  let rejectedWideRuns = 0;
 
   for (let gy = 3; gy <= GRID_H - 4; gy++) {
     for (let gx = 2; gx <= GRID_W - 3; gx++) {
@@ -167,7 +194,6 @@ export function processFrameLocally(
       const isContrast = contrastMask[idx] === 1;
       if (!isChroma && !isContrast) continue;
 
-      // Measure contiguous horizontal run of similar mask to reject wide solid UI buttons/headers
       let horizRun = 1;
       for (let lx = gx - 1; lx >= Math.max(0, gx - 16); lx--) {
         if (contrastMask[gy * GRID_W + lx] || chromaCandleMask[gy * GRID_W + lx]) horizRun++;
@@ -178,8 +204,19 @@ export function processFrameLocally(
         else break;
       }
 
-      if (horizRun >= 8) {
-        continue; // Likely a solid UI button, right-axis pill, wide header, or panel border — not a candle
+      let vertRun = 1;
+      for (let uy = gy - 1; uy >= Math.max(0, gy - 16); uy--) {
+        if (contrastMask[uy * GRID_W + gx] || chromaCandleMask[uy * GRID_W + gx]) vertRun++;
+        else break;
+      }
+      for (let dy = gy + 1; dy <= Math.min(GRID_H - 1, gy + 16); dy++) {
+        if (contrastMask[dy * GRID_W + gx] || chromaCandleMask[dy * GRID_W + gx]) vertRun++;
+        else break;
+      }
+
+      if (horizRun >= 14 || (horizRun >= 7 && horizRun > vertRun * 1.8)) {
+        rejectedWideRuns++;
+        continue; // Wide UI button, right-axis price pill, or panel bar — not a candle
       }
 
       // Check vertical stroke continuity (candle body or wick, +-1 cells)
@@ -249,12 +286,14 @@ export function processFrameLocally(
   const spanX = maxGx >= minGx ? (maxGx - minGx + 1) / GRID_W : 0;
   const spanY = maxGy >= minGy ? (maxGy - minGy + 1) / GRID_H : 0;
 
+  let failureReason: LocalFrameDiagnostics['failureReason'] = null;
+  if (totalCandleSamples < 9) failureReason = 'insufficient_candle_samples';
+  else if (activeColumns < 4) failureReason = 'insufficient_active_columns';
+  else if (spanX < 0.10) failureReason = 'insufficient_horizontal_span';
+  else if (spanY < 0.04) failureReason = 'insufficient_vertical_span';
+
   // Genuine candlestick chart requires >= 4 distinct candle columns and vertical body span (including tight M1 ranges)
-  const chartDetected =
-    totalCandleSamples >= 9 &&
-    activeColumns >= 4 &&
-    spanX >= 0.10 &&
-    spanY >= 0.04;
+  const chartDetected = failureReason === null;
 
   const padXLeft = 0.03;
   const padXRight = 0.03;
@@ -312,7 +351,24 @@ export function processFrameLocally(
           if (maxHSpan >= maxBtnSpan) break;
         }
         if (maxHSpan < maxBtnSpan) {
-          rightCandleNormX = Math.max(rightCandleNormX, (px + 1) / width);
+          let isDashedLine = false;
+          if (colColoredHits <= 3 && segMidRows.length === 1) {
+            const dashPy = segMidRows[0];
+            let gapSeen = false;
+            for (let dx = 2; dx <= 16 && px + dx < width; dx++) {
+              const dIdx = (dashPy * width + px + dx) * 4;
+              const dk = classifyCandlePixel(rgba[dIdx], rgba[dIdx + 1], rgba[dIdx + 2], bg);
+              if (dk === null) {
+                gapSeen = true;
+              } else if (gapSeen) {
+                isDashedLine = true;
+                break;
+              }
+            }
+          }
+          if (!isDashedLine) {
+            rightCandleNormX = Math.max(rightCandleNormX, (px + 1) / width);
+          }
         }
       }
     }
@@ -343,6 +399,18 @@ export function processFrameLocally(
     candleDensityScore,
     diffScore,
     signature,
+    diagnostics: {
+      width,
+      height,
+      bg: { r: bg.r, g: bg.g, b: bg.b, luma: Math.round(bg.luma) },
+      totalCandleSamples: Number(totalCandleSamples.toFixed(1)),
+      activeColumns,
+      activeRows: activeRowIndices.length,
+      spanX: Number(spanX.toFixed(4)),
+      spanY: Number(spanY.toFixed(4)),
+      rejectedWideRuns,
+      failureReason,
+    },
   };
 }
 
@@ -500,14 +568,18 @@ function findRightmostCandle(
   // Group localized tiny 2px colored clusters (e.g. newly opened M1 candle) ONLY when span <= 16px
   // so 2px horizontal price lines never merge into or spoof candles
   if (tinyColoredCols.length > 0) {
+    let lastColoredValidPx = -1;
+    for (let i = validCols.length - 1; i >= 0; i--) {
+      if (validCols[i].bull + validCols[i].bear >= 2) {
+        lastColoredValidPx = validCols[i].px;
+        break;
+      }
+    }
     let tCluster: ColStats[] = [tinyColoredCols[0]];
     const flushTiny = () => {
       const span = tCluster[tCluster.length - 1].px - tCluster[0].px + 1;
-      if (tCluster.length >= 2 && span <= 16) {
-        const lastValidPx = validCols.length > 0 ? validCols[validCols.length - 1].px : -1;
-        if (tCluster[0].px > lastValidPx) {
-          validCols.push(...tCluster);
-        }
+      if (tCluster.length >= 2 && span <= 16 && tCluster[0].px > lastColoredValidPx) {
+        validCols.push(...tCluster);
       }
     };
     for (let i = 1; i < tinyColoredCols.length; i++) {
@@ -527,18 +599,40 @@ function findRightmostCandle(
 
   if (validCols.length === 0) return null;
 
-  // Group into contiguous horizontal candle clusters
-  const clusters: ColStats[][] = [];
+  // Group into contiguous horizontal candle clusters, splitting mega-clusters bridged by 3px horizontal indicator/price lines
+  const rawClusters: ColStats[][] = [];
   let current: ColStats[] = [validCols[0]];
   for (let i = 1; i < validCols.length; i++) {
     if (validCols[i].px - validCols[i - 1].px <= 3) {
       current.push(validCols[i]);
     } else {
-      clusters.push(current);
+      rawClusters.push(current);
       current = [validCols[i]];
     }
   }
-  clusters.push(current);
+  rawClusters.push(current);
+
+  const clusters: ColStats[][] = [];
+  for (const rc of rawClusters) {
+    const spanPx = rc[rc.length - 1].px - rc[0].px + 1;
+    if (spanPx <= maxCandleSpan) {
+      clusters.push(rc);
+    } else {
+      const strongCols = rc.filter((col) => col.bestRun >= 5 || (col.maxPy - col.minPy + 1 >= 6 && col.activeRows.length >= 5));
+      if (strongCols.length > 0) {
+        let sub: ColStats[] = [strongCols[0]];
+        for (let i = 1; i < strongCols.length; i++) {
+          if (strongCols[i].px - strongCols[i - 1].px <= 3) {
+            sub.push(strongCols[i]);
+          } else {
+            clusters.push(sub);
+            sub = [strongCols[i]];
+          }
+        }
+        clusters.push(sub);
+      }
+    }
+  }
 
   // Filter out wide solid UI bars, horizontal-only price line streaks, and flat horizontal right-axis price pills
   const candleClusters = clusters.filter((c) => {
@@ -568,14 +662,14 @@ function findRightmostCandle(
       return false;
     }
 
-    // Exclude horizontal or boundary-clipped right-axis UI price pills while keeping genuine interior wickless M1 candles and newly opened 2-4px candles
+    // Exclude horizontal or boundary-clipped right-axis UI price pills while keeping genuine interior wickless M1 candles
     const touchesRightBoundary = c[c.length - 1].px >= bx1 - 6;
     if (
       spanPx >= 8 &&
       c.length >= 4 &&
       avgHeight >= 5 &&
       avgHeight <= 24 &&
-      (spanPx >= avgHeight * 1.1 || touchesRightBoundary)
+      (touchesRightBoundary || spanPx >= avgHeight * 2.1)
     ) {
       const flatTopBottom = maxTop - minTop <= 1 && maxBot - minBot <= 1;
       const solidFill = fillSum / c.length >= 0.88;

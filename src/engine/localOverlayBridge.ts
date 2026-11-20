@@ -160,8 +160,34 @@ interface CachedLiveCandleEntry {
   updatedAt: number;
 }
 
+export interface BridgeDiagnosticSnapshot {
+  candleSentCount: number;
+  candleFailCount: number;
+  statusSentCount: number;
+  statusWithAnchorCount: number;
+  statusFailCount: number;
+  lastCandleCoords: { x: number; y: number; topY: number; dir: string } | null;
+  lastStatusAnchor: { x: number; y: number; status: string } | null;
+  lastError: string | null;
+}
+
 let cachedLiveCandle: CachedLiveCandleEntry | null = null;
 const LIVE_CANDLE_ANCHOR_CACHE_MS = 2500;
+
+const bridgeDiag: BridgeDiagnosticSnapshot = {
+  candleSentCount: 0,
+  candleFailCount: 0,
+  statusSentCount: 0,
+  statusWithAnchorCount: 0,
+  statusFailCount: 0,
+  lastCandleCoords: null,
+  lastStatusAnchor: null,
+  lastError: null,
+};
+
+export function getLastBridgeDiagnosticSnapshot(): BridgeDiagnosticSnapshot {
+  return { ...bridgeDiag };
+}
 
 function clampUnit(value: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
@@ -323,6 +349,12 @@ export async function pushLocalOverlayCandle(
       liveCandle: safeCandle,
       updatedAt: Date.now(),
     };
+    bridgeDiag.lastCandleCoords = {
+      x: safeCandle.x,
+      y: safeCandle.y,
+      topY: safeCandle.topY,
+      dir: safeCandle.direction,
+    };
   } else if (cachedLiveCandle && cachedLiveCandle.sessionId === sessionId) {
     if (Date.now() - cachedLiveCandle.updatedAt > LIVE_CANDLE_ANCHOR_CACHE_MS) {
       cachedLiveCandle = null;
@@ -341,7 +373,15 @@ export async function pushLocalOverlayCandle(
     },
     1000
   );
-  return Boolean(res && res.ok);
+  const ok = Boolean(res && res.ok);
+  if (ok) {
+    if (safeCandle) bridgeDiag.candleSentCount++;
+    bridgeDiag.lastError = null;
+  } else {
+    bridgeDiag.candleFailCount++;
+    bridgeDiag.lastError = res ? `/overlay/candle HTTP ${res.status}` : '/overlay/candle unreachable';
+  }
+  return ok;
 }
 
 export async function pushLocalOverlayStatus(
@@ -361,11 +401,29 @@ export async function pushLocalOverlayStatus(
     },
     1000
   );
-  return Boolean(res && res.ok);
+  const ok = Boolean(res && res.ok);
+  if (ok) {
+    bridgeDiag.statusSentCount++;
+    if (payload?.anchor) {
+      bridgeDiag.statusWithAnchorCount++;
+      bridgeDiag.lastStatusAnchor = {
+        x: payload.anchor.x,
+        y: payload.anchor.y,
+        status: payload.status,
+      };
+    }
+    bridgeDiag.lastError = null;
+  } else {
+    bridgeDiag.statusFailCount++;
+    bridgeDiag.lastError = res ? `/overlay/status HTTP ${res.status}` : '/overlay/status unreachable';
+  }
+  return ok;
 }
 
 export async function clearLocalOverlaySignals(sessionId: string | null): Promise<boolean> {
   cachedLiveCandle = null;
+  bridgeDiag.lastCandleCoords = null;
+  bridgeDiag.lastStatusAnchor = null;
   const res = await fetchLocalOverlay(
     '/overlay/clear',
     {
